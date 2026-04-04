@@ -5,7 +5,8 @@
   "compatibilityLevel": "JAVA_17",
   "client": [
     "DashboardScreenMixin",
-    "DashboardListAccessor"
+    "DashboardListAccessor",
+    "TrainClientMixin"
   ],
   "injectors": {
     "defaultRequire": 1

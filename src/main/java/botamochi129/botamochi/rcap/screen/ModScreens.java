@@ -13,7 +13,7 @@ public class ModScreens {
         HOUSING_SCREEN_HANDLER = ScreenHandlerRegistry.registerExtended(
                 new Identifier(Rcap.MOD_ID, "housing_screen"),
                 (syncId, playerInventory, buf) ->
-                        new HousingBlockScreenHandler(syncId, playerInventory, buf.readBlockPos(), buf.readInt())
+                        new HousingBlockScreenHandler(syncId, playerInventory, buf)
         );
         OFFICE_SCREEN_HANDLER = ScreenHandlerRegistry.registerExtended(
                 new Identifier(Rcap.MOD_ID, "office_screen"),

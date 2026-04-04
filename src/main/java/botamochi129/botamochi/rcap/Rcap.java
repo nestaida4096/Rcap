@@ -18,6 +18,7 @@ import botamochi129.botamochi.rcap.passenger.PassengerMovement;
 import botamochi129.botamochi.rcap.screen.ModScreens;
 import mtr.data.RailwayData;
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
@@ -29,7 +30,9 @@ import net.minecraft.block.entity.BlockEntityType;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemGroup;
+import net.minecraft.server.command.CommandManager;
 import net.minecraft.server.world.ServerWorld;
+import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.registry.Registry;
 
@@ -153,5 +156,15 @@ public class Rcap implements ModInitializer {
                 }
             }
         });
+
+        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
+                dispatcher.register(CommandManager.literal("rcap_clear_passengers")
+                        .requires(source -> source.hasPermissionLevel(2))
+                        .executes(context -> {
+                            int removed = PassengerManager.clearAll(context.getSource().getServer());
+                            context.getSource().sendFeedback(Text.literal("Cleared " + removed + " passengers."), true);
+                            return removed;
+                        }))
+        );
     }
 }

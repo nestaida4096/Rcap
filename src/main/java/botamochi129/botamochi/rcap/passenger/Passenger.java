@@ -19,6 +19,8 @@ public class Passenger {
     // --- 追加部分 ---
     /** 移動ルートとしてのプラットフォームIDリスト */
     public List<Long> route = new ArrayList<>();
+    /** 各プラットフォーム step で次に乗るべき routeId。徒歩 step や終点は -1 */
+    public final List<Long> boardingRouteIds = new ArrayList<>();
 
     /** 現在目標としているルートのインデックス */
     public int routeTargetIndex = 0;
@@ -57,6 +59,7 @@ public class Passenger {
     public long alightingPlatformId = -1L;
     // スケジュールから得られた routeId
     public long scheduledRouteId = -1L;
+    public int alightRouteIndex = -1;
 
     // 追加: サーバが計算したプラットフォーム／オフィス座標（クライアントが platformId を持っていない場合のフォールバック）
     public double boardingX = Double.NaN, boardingY = Double.NaN, boardingZ = Double.NaN;
@@ -66,12 +69,15 @@ public class Passenger {
     public double destinationX = Double.NaN, destinationY = Double.NaN, destinationZ = Double.NaN;
     public double homeX = Double.NaN, homeY = Double.NaN, homeZ = Double.NaN;
     public final List<Long> returnRoute = new ArrayList<>();
+    public final List<Long> returnBoardingRouteIds = new ArrayList<>();
     public boolean returningHome = false;
     public long destinationWaitUntilMillis = -1L;
     public boolean commuteTrip = true;
     public final List<Long> walkPath = new ArrayList<>();
     public int walkPathIndex = 0;
     public long walkTargetKey = Long.MIN_VALUE;
+    public long lastAlightedRouteId = -1L;
+    public long lastAlightedAtMillis = -1L;
 
     public Passenger(long id, String name, double x, double y, double z, int color, String worldId) {
         this.id = id;
@@ -102,6 +108,12 @@ public class Passenger {
         }
         tag.put("route", listTag);
 
+        NbtList boardingRouteTag = new NbtList();
+        for (Long routeId : boardingRouteIds) {
+            boardingRouteTag.add(NbtLong.of(routeId));
+        }
+        tag.put("boardingRouteIds", boardingRouteTag);
+
         tag.putInt("routeTargetIndex", routeTargetIndex);
         tag.putInt("moveState", moveState.ordinal());
         tag.putInt("skinIndex", skinIndex);
@@ -112,6 +124,7 @@ public class Passenger {
         tag.putLong("boardingPlatformId", boardingPlatformId);
         tag.putLong("alightingPlatformId", alightingPlatformId);
         tag.putLong("scheduledRouteId", scheduledRouteId);
+        tag.putInt("alightRouteIndex", alightRouteIndex);
 
         // 座標保存（DoubleをNBTに）
         tag.putDouble("boardingX", boardingX);
@@ -134,9 +147,16 @@ public class Passenger {
             returnRouteTag.add(NbtLong.of(platformId));
         }
         tag.put("returnRoute", returnRouteTag);
+        NbtList returnBoardingRouteTag = new NbtList();
+        for (Long routeId : returnBoardingRouteIds) {
+            returnBoardingRouteTag.add(NbtLong.of(routeId));
+        }
+        tag.put("returnBoardingRouteIds", returnBoardingRouteTag);
         tag.putBoolean("returningHome", returningHome);
         tag.putLong("destinationWaitUntilMillis", destinationWaitUntilMillis);
         tag.putBoolean("commuteTrip", commuteTrip);
+        tag.putLong("lastAlightedRouteId", lastAlightedRouteId);
+        tag.putLong("lastAlightedAtMillis", lastAlightedAtMillis);
 
         // currentCarIndex はクライアントのみで検出・使用する想定のため NBT に含めない（必要なら追加可能）
 
@@ -165,6 +185,19 @@ public class Passenger {
                 }
             }
         }
+        p.boardingRouteIds.clear();
+        if (tag.contains("boardingRouteIds")) {
+            NbtList boardingRouteList = tag.getList("boardingRouteIds", NbtElement.LONG_TYPE);
+            for (int i = 0; i < boardingRouteList.size(); i++) {
+                var element = boardingRouteList.get(i);
+                if (element instanceof NbtLong nbtLong) {
+                    p.boardingRouteIds.add(nbtLong.longValue());
+                }
+            }
+        }
+        while (p.boardingRouteIds.size() < p.route.size()) {
+            p.boardingRouteIds.add(-1L);
+        }
 
         p.routeTargetIndex = tag.getInt("routeTargetIndex");
 
@@ -181,6 +214,7 @@ public class Passenger {
         p.boardingPlatformId = tag.contains("boardingPlatformId") ? tag.getLong("boardingPlatformId") : -1L;
         p.alightingPlatformId = tag.contains("alightingPlatformId") ? tag.getLong("alightingPlatformId") : -1L;
         p.scheduledRouteId = tag.contains("scheduledRouteId") ? tag.getLong("scheduledRouteId") : -1L;
+        p.alightRouteIndex = tag.contains("alightRouteIndex") ? tag.getInt("alightRouteIndex") : -1;
 
         p.boardingX = tag.contains("boardingX") ? tag.getDouble("boardingX") : Double.NaN;
         p.boardingY = tag.contains("boardingY") ? tag.getDouble("boardingY") : Double.NaN;
@@ -205,9 +239,24 @@ public class Passenger {
                 }
             }
         }
+        p.returnBoardingRouteIds.clear();
+        if (tag.contains("returnBoardingRouteIds")) {
+            NbtList returnBoardingRouteList = tag.getList("returnBoardingRouteIds", NbtElement.LONG_TYPE);
+            for (int i = 0; i < returnBoardingRouteList.size(); i++) {
+                var element = returnBoardingRouteList.get(i);
+                if (element instanceof NbtLong nbtLong) {
+                    p.returnBoardingRouteIds.add(nbtLong.longValue());
+                }
+            }
+        }
+        while (p.returnBoardingRouteIds.size() < p.returnRoute.size()) {
+            p.returnBoardingRouteIds.add(-1L);
+        }
         p.returningHome = tag.contains("returningHome") && tag.getBoolean("returningHome");
         p.destinationWaitUntilMillis = tag.contains("destinationWaitUntilMillis") ? tag.getLong("destinationWaitUntilMillis") : -1L;
         p.commuteTrip = !tag.contains("commuteTrip") || tag.getBoolean("commuteTrip");
+        p.lastAlightedRouteId = tag.contains("lastAlightedRouteId") ? tag.getLong("lastAlightedRouteId") : -1L;
+        p.lastAlightedAtMillis = tag.contains("lastAlightedAtMillis") ? tag.getLong("lastAlightedAtMillis") : -1L;
 
         // currentTrainId / currentCarIndex はクライアント側で検出・埋めるため NBT では保持しない
         p.currentTrainId = null;

@@ -57,9 +57,11 @@ public class PassengerRenderer {
 
             // grid cell sizes (meters)
             // 前後方向: 1.0m, 左右方向: 0.5m
-            final double LONG_CELL = 0.9;
-            final double LAT_CELL = 0.5;
-            final double LONGITUDINAL_MARGIN = 1.0;
+            final double LONG_CELL = 0.65;
+            final double LAT_CELL = 0.35;
+            final double LONGITUDINAL_MARGIN = 0.45;
+            final double LATERAL_MARGIN = 0.2;
+            final double FLOOR_OFFSET = 0.95;
 
             for (Passenger passenger : passengers) {
                 // computed orientation to apply to whole model (matrix) for on-train passengers
@@ -92,15 +94,9 @@ public class PassengerRenderer {
                                 double refZ = Double.isNaN(passenger.boardingZ) ? passenger.z : passenger.boardingZ;
                                 for (int i = 0; i < carCount; i++) {
                                     try {
-                                        Vec3d carAnchor = ((TrainAccessor) matchedTrain).callGetRoutePosition(i, matchedTrain.spacing);
-                                        Vec3d forward = computeCarForwardVector(matchedTrain, i);
-                                        if (forward == null) forward = new Vec3d(0, 0, 1);
-                                        Vec3d horizontalForward = new Vec3d(forward.x, 0.0, forward.z);
-                                        double hfLen = Math.sqrt(horizontalForward.x * horizontalForward.x + horizontalForward.z * horizontalForward.z);
-                                        if (hfLen == 0) horizontalForward = new Vec3d(0, 0, 1);
-                                        else horizontalForward = new Vec3d(horizontalForward.x / hfLen, 0.0, horizontalForward.z / hfLen);
                                         double spacing = safeGetDoubleField(matchedTrain, "spacing", (double) matchedTrain.spacing);
-                                        Vec3d carCenter = getCarInteriorCenter(carAnchor, horizontalForward, forward, spacing, isTrainReversed(matchedTrain));
+                                        CarGeometry geometry = getCarGeometry(matchedTrain, i, spacing, new Vec3d(refX, refY, refZ));
+                                        Vec3d carCenter = geometry.center();
                                         double dx = carCenter.x - refX;
                                         double dy = carCenter.y - refY;
                                         double dz = carCenter.z - refZ;
@@ -122,11 +118,20 @@ public class PassengerRenderer {
                             // Now compute placement inside that car and orientation
                             if (passenger.currentCarIndex >= 0 && (carCount == 1 ? passenger.currentCarIndex == 0 : passenger.currentCarIndex < carCount)) {
                                 int carIdx = passenger.currentCarIndex;
-                                Vec3d carAnchor = ((TrainAccessor) matchedTrain).callGetRoutePosition(carIdx, matchedTrain.spacing);
+                                double spacing = safeGetDoubleField(matchedTrain, "spacing", (double) matchedTrain.spacing);
+                                Vec3d geometryReference = new Vec3d(passenger.x, passenger.y, passenger.z);
+                                if (Double.isNaN(geometryReference.x) || Double.isNaN(geometryReference.y) || Double.isNaN(geometryReference.z)) {
+                                    geometryReference = new Vec3d(
+                                            Double.isNaN(passenger.boardingX) ? 0.0 : passenger.boardingX,
+                                            Double.isNaN(passenger.boardingY) ? 0.0 : passenger.boardingY,
+                                            Double.isNaN(passenger.boardingZ) ? 0.0 : passenger.boardingZ
+                                    );
+                                }
+                                CarGeometry geometry = getCarGeometry(matchedTrain, carIdx, spacing, geometryReference);
+                                Vec3d center = geometry.center();
+                                Vec3d frameForward = geometry.forward();
 
-                                // derive robust forward vector from neighbouring positions (prefer this)
-                                Vec3d forward = computeCarForwardVector(matchedTrain, carIdx);
-                                if (forward == null) {
+                                if (frameForward == null) {
                                     // fallback to yaw/pitch if forward sampling failed
                                     Double yawDegFb = tryGetTrainYawDeg(matchedTrain, carIdx);
                                     Double pitchDegFb = tryGetTrainPitchDeg(matchedTrain, carIdx);
@@ -139,39 +144,36 @@ public class PassengerRenderer {
                                             fy = Math.sin(Math.toRadians(pitchDegFb));
                                         }
                                         double len = Math.sqrt(fx * fx + fy * fy + fz * fz);
-                                        forward = len == 0 ? new Vec3d(0, 0, 1) : new Vec3d(fx / len, fy / len, fz / len);
+                                        frameForward = len == 0 ? new Vec3d(0, 0, 1) : new Vec3d(fx / len, fy / len, fz / len);
                                     } else {
                                         // additional fallback for single-car or missing yaw: try using vector to nearest other train
-                                        Vec3d nearestOther = findNearestOtherTrainVector(matchedTrain, carAnchor);
-                                        if (nearestOther != null) forward = nearestOther;
-                                        else forward = new Vec3d(0, 0, 1);
+                                        Vec3d nearestOther = findNearestOtherTrainVector(matchedTrain, center);
+                                        if (nearestOther != null) frameForward = nearestOther;
+                                        else frameForward = new Vec3d(0, 0, 1);
                                     }
                                 }
 
-                                // Use horizontal forward for placement grid (project out vertical)
-                                Vec3d horizontalForward = new Vec3d(forward.x, 0.0, forward.z);
-                                double hfLen = Math.sqrt(horizontalForward.x * horizontalForward.x + horizontalForward.z * horizontalForward.z);
-                                if (hfLen == 0) horizontalForward = new Vec3d(0, 0, 1);
-                                else horizontalForward = new Vec3d(horizontalForward.x / hfLen, 0.0, horizontalForward.z / hfLen);
+                                frameForward = normalizeOrDefault(frameForward, new Vec3d(0, 0, 1));
+                                Vec3d worldUp = new Vec3d(0, 1, 0);
+                                Vec3d frameRight = worldUp.crossProduct(frameForward);
+                                frameRight = normalizeOrDefault(frameRight, new Vec3d(1, 0, 0));
+                                Vec3d frameUp = normalizeOrDefault(frameForward.crossProduct(frameRight), worldUp);
 
-                                // lateral (right vector) in horizontal plane
-                                Vec3d lateral = new Vec3d(horizontalForward.z, 0.0, -horizontalForward.x);
+                                // Yaw for visual rotation should still use horizontal heading.
+                                Vec3d horizontalForward = normalizeOrDefault(new Vec3d(frameForward.x, 0.0, frameForward.z), new Vec3d(0, 0, 1));
 
                                 // compute yaw/pitch for whole-body rotation based on horizontalForward and forward.y
                                 double yawRad = Math.atan2(horizontalForward.x, horizontalForward.z);
                                 double yawDeg = Math.toDegrees(yawRad);
-                                double pitchDeg = Math.toDegrees(Math.asin(clamp(forward.y, -1.0, 1.0)));
+                                double pitchDeg = Math.toDegrees(Math.asin(clamp(frameForward.y, -1.0, 1.0)));
 
                                 // Decide left/right facing (per passenger)
                                 boolean faceRight = ((passenger.id & 1L) == 0L);
                                 computedYawDeg = yawDeg + (faceRight ? 90.0 : -90.0);
                                 computedPitchDeg = pitchDeg;
 
-                                // read spacing & width (reflection, with fallbacks)
-                                double spacing = safeGetDoubleField(matchedTrain, "spacing", (double) matchedTrain.spacing);
+                                // read width (reflection, with fallbacks)
                                 double width = safeGetDoubleField(matchedTrain, "width", 2.0);
-
-                                Vec3d center = getCarInteriorCenter(carAnchor, horizontalForward, forward, spacing, isTrainReversed(matchedTrain));
 
                                 // Prepare frame occupancy for this train/car
                                 frameOccupied.computeIfAbsent(matchedTrain.id, k -> new HashMap<>());
@@ -180,7 +182,8 @@ public class PassengerRenderer {
 
                                 double usableLength = Math.max(LONG_CELL, spacing - LONGITUDINAL_MARGIN * 2.0);
                                 int intSpacing = Math.max(1, (int) Math.floor(usableLength / LONG_CELL));
-                                int intWidth = Math.max(1, (int)Math.round(width / LAT_CELL));
+                                double usableWidth = Math.max(LAT_CELL, width - LATERAL_MARGIN * 2.0);
+                                int intWidth = Math.max(1, (int)Math.floor(usableWidth / LAT_CELL));
 
                                 // pick a cell with probing to avoid collisions
                                 int[] chosen = pickAvailableCellIndex(passenger, matchedTrain, carIdx, intSpacing, intWidth, trainOcc.get(carIdx));
@@ -191,21 +194,16 @@ public class PassengerRenderer {
                                 double startLat = -((intWidth - 1) / 2.0) * LAT_CELL;
                                 double longitudinal = startLong + idxLong * LONG_CELL;
                                 double lateralInt = startLat + idxLat * LAT_CELL;
+                                double maxLongitudinal = Math.max(0.0, usableLength / 2.0 - 0.2);
+                                double maxLateral = Math.max(0.0, usableWidth / 2.0 - 0.1);
+                                longitudinal = clamp(longitudinal, -maxLongitudinal, maxLongitudinal);
+                                lateralInt = clamp(lateralInt, -maxLateral, maxLateral);
 
-                                // convert to world offset using horizontalForward & lateral (both unit length)
-                                double offX = horizontalForward.x * longitudinal + lateral.x * lateralInt;
-                                double offY = horizontalForward.y * longitudinal + lateral.y * lateralInt;
-                                double offZ = horizontalForward.z * longitudinal + lateral.z * lateralInt;
+                                Vec3d offset = frameForward.multiply(longitudinal).add(frameRight.multiply(lateralInt));
 
-                                // small deterministic vertical jitter
-                                long seed = passenger.id ^ (matchedTrain.id * 31L) ^ (carIdx * 131);
-                                Random r = new Random(seed);
-                                double vert = ((r.nextDouble() - 0.5) * 0.2);
-                                offY += vert;
-
-                                double targetX = center.x + offX;
-                                double targetY = center.y + offY + 1.0; // base height above center
-                                double targetZ = center.z + offZ;
+                                double targetX = center.x + offset.x + frameUp.x * FLOOR_OFFSET;
+                                double targetY = center.y + offset.y + frameUp.y * FLOOR_OFFSET - 1.0;
+                                double targetZ = center.z + offset.z + frameUp.z * FLOOR_OFFSET;
 
                                 if (snapToTrainTarget) {
                                     passenger.x = targetX;
@@ -327,38 +325,12 @@ public class PassengerRenderer {
                                     var mid = ap.getMidPos();
                                     applySmoothPosition(passenger, mid.getX() + 0.5, mid.getY() + 1.0, mid.getZ() + 0.5, 0.6);
                                     teleported = true;
-                                } else {
-                                    long nearestPid = Long.MIN_VALUE;
-                                    double bestDist = Double.MAX_VALUE;
-                                    for (Platform p : ClientData.DATA_CACHE.platformIdMap.values()) {
-                                        var mid = p.getMidPos();
-                                        double px = mid.getX() + 0.5;
-                                        double py = mid.getY() + 1.0;
-                                        double pz = mid.getZ() + 0.5;
-                                        double dx = px - passenger.x;
-                                        double dy = py - passenger.y;
-                                        double dz = pz - passenger.z;
-                                        double d2 = dx * dx + dy * dy + dz * dz;
-                                        if (d2 < bestDist) {
-                                            bestDist = d2;
-                                            nearestPid = p.id;
-                                        }
-                                    }
-                                    if (nearestPid != Long.MIN_VALUE) {
-                                        Platform nearest = ClientData.DATA_CACHE.platformIdMap.get(nearestPid);
-                                        if (nearest != null) {
-                                            var mid = nearest.getMidPos();
-                                            applySmoothPosition(passenger, mid.getX() + 0.5, mid.getY() + 1.0, mid.getZ() + 0.5, 0.6);
-                                            teleported = true;
-                                        }
-                                    }
                                 }
                             }
 
                             if (teleported) {
-                                passenger.x += (Math.random() - 0.5) * 0.5;
-                                passenger.z += (Math.random() - 0.5) * 0.5;
-                                System.out.println("PassengerRenderer: teleported passenger " + passenger.id + " to nearest platform for visual stability");
+                                passenger.x += (Math.random() - 0.5) * 0.05;
+                                passenger.z += (Math.random() - 0.5) * 0.05;
                             }
                         }
                     }
@@ -417,22 +389,12 @@ public class PassengerRenderer {
             for (TrainClient trainClient : ClientData.TRAINS) {
                 if (trainClient == null) continue;
                 try {
-                    long trainRouteId = Long.MIN_VALUE;
-                    try {
-                        Field f = trainClient.getClass().getField("routeId");
-                        f.setAccessible(true);
-                        Object v = f.get(trainClient);
-                        if (v instanceof Number) trainRouteId = ((Number) v).longValue();
-                    } catch (NoSuchFieldException ignored) {
-                        try {
-                            Method m = trainClient.getClass().getMethod("getRouteId");
-                            Object v = m.invoke(trainClient);
-                            if (v instanceof Number) trainRouteId = ((Number) v).longValue();
-                        } catch (Throwable ignored2) {}
+                    if (trainMatchesScheduledRoute(trainClient, passenger.scheduledRouteId)) {
+                        return trainClient;
                     }
-                    if (trainRouteId != Long.MIN_VALUE && trainRouteId == passenger.scheduledRouteId) return trainClient;
                 } catch (Throwable ignored) {}
             }
+            return null;
         }
 
         double refX = Double.isNaN(passenger.boardingX) ? passenger.x : passenger.boardingX;
@@ -456,6 +418,55 @@ public class PassengerRenderer {
             } catch (Throwable ignored) {}
         }
         if (nearest != null && best < 128 * 128) return nearest;
+        return null;
+    }
+
+    private static boolean trainMatchesScheduledRoute(TrainClient trainClient, long scheduledRouteId) {
+        long directRouteId = tryReadLong(trainClient, "routeId", "getRouteId");
+        if (directRouteId != Long.MIN_VALUE) {
+            return directRouteId == scheduledRouteId;
+        }
+
+        Object routeIdsObject = tryReadObject(trainClient, "routeIds", "getRouteIds");
+        if (routeIdsObject instanceof Iterable<?> iterable) {
+            for (Object item : iterable) {
+                if (item instanceof Number number && number.longValue() == scheduledRouteId) {
+                    return true;
+                }
+            }
+        } else if (routeIdsObject != null && routeIdsObject.getClass().isArray()) {
+            int length = Array.getLength(routeIdsObject);
+            for (int i = 0; i < length; i++) {
+                Object item = Array.get(routeIdsObject, i);
+                if (item instanceof Number number && number.longValue() == scheduledRouteId) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static long tryReadLong(Object target, String fieldName, String getterName) {
+        Object value = tryReadObject(target, fieldName, getterName);
+        return value instanceof Number number ? number.longValue() : Long.MIN_VALUE;
+    }
+
+    private static Object tryReadObject(Object target, String fieldName, String getterName) {
+        try {
+            Field f = target.getClass().getField(fieldName);
+            f.setAccessible(true);
+            return f.get(target);
+        } catch (Throwable ignored) {}
+        try {
+            Field f = target.getClass().getDeclaredField(fieldName);
+            f.setAccessible(true);
+            return f.get(target);
+        } catch (Throwable ignored) {}
+        try {
+            Method m = target.getClass().getMethod(getterName);
+            return m.invoke(target);
+        } catch (Throwable ignored) {}
         return null;
     }
 
@@ -625,14 +636,68 @@ public class PassengerRenderer {
         return new int[]{idxLongInit, idxLatInit};
     }
 
-    private static Vec3d getCarInteriorCenter(Vec3d carAnchor, Vec3d horizontalForward, Vec3d forward, double spacing, boolean reversed) {
-        double halfSpacing = spacing / 2.0;
-        double sign = reversed ? -1.0 : 1.0;
-        return new Vec3d(
-                carAnchor.x + horizontalForward.x * halfSpacing * sign,
-                carAnchor.y + forward.y * halfSpacing * sign,
-                carAnchor.z + horizontalForward.z * halfSpacing * sign
-        );
+    private static Vec3d getCarInteriorCenter(Vec3d carAnchor, Vec3d frameForward, double spacing, Vec3d reference) {
+        Vec3d halfCarOffset = frameForward.multiply(spacing * 0.5);
+        Vec3d candidateA = carAnchor.add(halfCarOffset);
+        Vec3d candidateB = carAnchor.subtract(halfCarOffset);
+        if (reference == null) {
+            return candidateA;
+        }
+        return candidateA.squaredDistanceTo(reference) <= candidateB.squaredDistanceTo(reference) ? candidateA : candidateB;
+    }
+
+    private static CarGeometry getCarGeometry(TrainClient trainClient, int carIndex, double spacing, Vec3d reference) {
+        TrainCarPoseTracker.Pose trackedPose = TrainCarPoseTracker.get(trainClient.id, carIndex);
+        if (trackedPose != null) {
+            Vec3d trackedForward = normalizeOrDefault(trackedPose.forward(), new Vec3d(0, 0, 1));
+            Vec3d trackedCenter = trackedPose.center();
+            return new CarGeometry(trackedCenter, trackedCenter, trackedForward);
+        }
+
+        Vec3d anchor = ((TrainAccessor) trainClient).callGetRoutePosition(carIndex, trainClient.spacing);
+        Vec3d forward = null;
+        Double yawDeg = tryGetTrainYawDeg(trainClient, carIndex);
+        Double pitchDeg = tryGetTrainPitchDeg(trainClient, carIndex);
+        if (yawDeg != null) {
+            double yawRad = Math.toRadians(yawDeg);
+            double pitchRad = Math.toRadians(pitchDeg == null ? 0.0 : pitchDeg);
+            double cosPitch = Math.cos(pitchRad);
+            forward = new Vec3d(
+                    Math.sin(yawRad) * cosPitch,
+                    Math.sin(pitchRad),
+                    Math.cos(yawRad) * cosPitch
+            );
+        }
+        if (forward == null) {
+            Vec3d oppositeAnchor = null;
+            try {
+                oppositeAnchor = ((TrainAccessor) trainClient).callGetRoutePosition(carIndex, -trainClient.spacing);
+            } catch (Throwable ignored) {
+            }
+            if (oppositeAnchor != null) {
+                Vec3d axis = oppositeAnchor.subtract(anchor);
+                forward = normalizeOrDefault(axis, null);
+            }
+        }
+        if (forward == null) {
+            forward = computeCarForwardVector(trainClient, carIndex);
+        }
+        forward = normalizeOrDefault(forward, new Vec3d(0, 0, 1));
+        Vec3d center = getCarInteriorCenter(anchor, forward, spacing, reference);
+
+        return new CarGeometry(anchor, center, forward);
+    }
+
+    private static Vec3d normalizeOrDefault(Vec3d vector, Vec3d fallback) {
+        if (vector == null) {
+            return fallback;
+        }
+        double lengthSquared = vector.lengthSquared();
+        if (lengthSquared < 1.0E-6) {
+            return fallback;
+        }
+        double invLength = 1.0 / Math.sqrt(lengthSquared);
+        return new Vec3d(vector.x * invLength, vector.y * invLength, vector.z * invLength);
     }
 
     private static boolean isTrainReversed(TrainClient trainClient) {
@@ -726,5 +791,8 @@ public class PassengerRenderer {
 
     private static double clamp(double v, double a, double b) {
         return v < a ? a : (v > b ? b : v);
+    }
+
+    private record CarGeometry(Vec3d anchor, Vec3d center, Vec3d forward) {
     }
 }

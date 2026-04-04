@@ -44,25 +44,9 @@ public class HousingBlock extends BlockWithEntity {
 
             player.openHandledScreen(housingBlockEntity);
 
-            OfficeBlockEntity office = null;
-            Long linkedOffice = housingBlockEntity.getLinkedOfficePosLong();
-            if (linkedOffice != null) {
-                office = OfficeManager.getAll().stream().filter(o -> o.getPos().asLong() == linkedOffice).findFirst().orElse(null);
+            if (housingBlockEntity.getLinkedOfficePosLong() == null && OfficeManager.getAll().isEmpty()) {
+                player.sendMessage(Text.literal("利用可能なオフィスが見つかりません。"), false);
             }
-            if (office == null) {
-                office = OfficeManager.getRandomAvailableOffice();
-                if (office == null) {
-                    player.sendMessage(Text.literal("利用可能なオフィスが見つかりません。"), false);
-                    return ActionResult.SUCCESS;
-                }
-                housingBlockEntity.setLinkedOfficePosLong(office.getPos().asLong());
-                // ここで経路キャッシュが生成される
-                player.sendMessage(Text.literal("オフィス紐付け＆経路再計算を行いました。しばらくしてから乗客が出現します。"), false);
-            } else {
-                // すでにオフィスが設定されている場合、何もしない
-            }
-
-            // 再計算要求・乗客強制生成等はここではせず、経路キャッシュが存在する場合のみspawnPassengersIfTimeで動作
 
             return ActionResult.SUCCESS;
         }

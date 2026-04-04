@@ -40,4 +40,15 @@ public class PassengerManager {
             RcapServerPackets.sendPassengerList(player);
         }
     }
+
+    public static int clearAll(MinecraftServer server) {
+        int removed = PASSENGER_LIST.size();
+        PASSENGER_LIST.clear();
+        PENDING_ADD_QUEUE.clear();
+        save();
+        if (server != null) {
+            broadcastToAllPlayers(server);
+        }
+        return removed;
+    }
 }
