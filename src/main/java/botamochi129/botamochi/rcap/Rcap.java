@@ -56,7 +56,7 @@ public class Rcap implements ModInitializer {
     public static final Block RIDING_POS_BLOCK = new RidingPosBlock(FabricBlockSettings.of(Material.STONE).strength(2.0f));
     public static BlockEntityType<RidingPosBlockEntity> RIDING_POS_BLOCK_ENTITY;
 
-    public static final Logger LOGGER = LogManager.getLogger();
+    public static final Logger LOGGER = LogManager.getLogger("RCAP");
 
     // 経路デバッグが有効なプレイヤーのUUIDを保持するスレッドセーフなセット
     private static final Set<UUID> debugPathPlayers = ConcurrentHashMap.newKeySet();
@@ -66,6 +66,7 @@ public class Rcap implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        LOGGER.info("Loading!");
         Registry.register(Registry.BLOCK, new Identifier(MOD_ID, "housing_block"), HOUSING_BLOCK);
         Registry.register(Registry.ITEM, new Identifier(MOD_ID, "housing_block"),
                 new BlockItem(HOUSING_BLOCK, new Item.Settings().group(ItemGroup.BUILDING_BLOCKS)));
@@ -91,7 +92,7 @@ public class Rcap implements ModInitializer {
         );
 
         ModScreens.registerScreenHandlers();
-        RcapServerPackets.register();
+        // RcapServerPackets.register();
         ServerNetworking.register();
 
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
@@ -185,7 +186,7 @@ public class Rcap implements ModInitializer {
                             try {
                                 PassengerMovement.updatePassenger(w, passenger, railwayData);
                             } catch (Exception e) {
-                                LOGGER.error("[RCAP] 乗客 " + passenger.name + " (" + passenger.id + ") の更新中にエラーが発生しました", e);
+                                LOGGER.error("乗客 " + passenger.name + " (" + passenger.id + ") の更新中にエラーが発生しました", e);
                             }
                         }
 

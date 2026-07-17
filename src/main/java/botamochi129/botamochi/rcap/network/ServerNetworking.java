@@ -7,6 +7,9 @@ import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 
+import java.util.HashSet;
+import java.util.Set;
+
 public class ServerNetworking {
     public static final Identifier UPDATE_COMPANY = new Identifier("rcap", "update_company");
     public static final Identifier DELETE_COMPANY = new Identifier("rcap", "delete_company");
@@ -17,11 +20,24 @@ public class ServerNetworking {
             long id = buf.readLong();
             String name = buf.readString();
             int color = buf.readInt();
+
+            int routeSize = buf.readInt();
+            Set<Long> ownedRoutes = new HashSet<>();
+            for (int i = 0; i < routeSize; i++) ownedRoutes.add(buf.readLong());
+
+            int depotSize = buf.readInt();
+            Set<Long> ownedDepots = new HashSet<>();
+            for (int i = 0; i < depotSize; i++) ownedDepots.add(buf.readLong());
+
             server.execute(() -> {
                 Company company = CompanyManager.getById(id);
                 if (company != null) {
+                    CompanyManager.COMPANY_LIST.remove(company);
                     company.name = name;
                     company.color = color;
+                    company.ownedRoutes.addAll(ownedRoutes);
+                    company.ownedDepots.addAll(ownedDepots);
+                    CompanyManager.COMPANY_LIST.add(company);
 
                     CompanyManager.save();
                     CompanyManager.broadcastToAllPlayers(server);

@@ -9,6 +9,8 @@ import net.minecraft.network.PacketByteBuf;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
 
+import static botamochi129.botamochi.rcap.network.ServerNetworking.*;
+
 public class ClientNetworking {
     public static final Identifier UPDATE_PLATFORM_ID = new Identifier("rcap", "update_platform_id");
 
@@ -32,7 +34,7 @@ public class ClientNetworking {
         buf.writeInt(company.ownedDepots.size());
         for (Long id : company.ownedDepots) buf.writeLong(id);
 
-        ClientPlayNetworking.send(RcapServerPackets.UPDATE_COMPANY, buf);
+        ClientPlayNetworking.send(UPDATE_COMPANY, buf);
     }
 
     public static void sendCreateCompanyPacket(Company company) {
@@ -40,12 +42,12 @@ public class ClientNetworking {
         buf.writeLong(company.id);
         buf.writeString(company.name);
         buf.writeInt(company.color);
-        ClientPlayNetworking.send(new Identifier("rcap", "create_company"), buf);
+        ClientPlayNetworking.send(CREATE_COMPANY, buf);
     }
 
     public static void sendDeleteCompanyPacket(long companyId) {
         PacketByteBuf buf = PacketByteBufs.create();
         buf.writeLong(companyId);
-        ClientPlayNetworking.send(new Identifier("rcap", "delete_company"), buf);
+        ClientPlayNetworking.send(DELETE_COMPANY, buf);
     }
 }

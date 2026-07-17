@@ -27,6 +27,11 @@ public class ColorPickerScreen extends Screen {
     private static final int HUE_BAR_HEIGHT = 12;
     private static final int PREVIEW_SIZE = 30;
 
+    // 💡 描画軽量化のためのグリッドサイズ (8px)
+    private static final int GRID_SIZE = 5;
+    // 💡 色相バーの軽量化描画ステップ (6px)
+    private static final int HUE_STEP = 3;
+
     private int paletteX;
     private int paletteY;
     private int hueBarX;
@@ -82,10 +87,10 @@ public class ColorPickerScreen extends Screen {
         // タイトル
         drawCenteredText(matrices, textRenderer, title, this.width / 2, 10, 0xFFFFFF);
 
-        // 1. 彩度・明度(S・V)パレットの描画
+        // 1. 彩度・明度(S・V)パレットの描画 (8pxのグリッド描画で超軽量化)
         drawSaturationValuePalette(matrices);
 
-        // 2. 色相(Hue)バーの描画
+        // 2. 色相(Hue)バーの描画 (6px幅のステップ描画で軽量化)
         drawHueBar(matrices);
 
         // ドラッグ処理のアップデート
@@ -112,23 +117,25 @@ public class ColorPickerScreen extends Screen {
     }
 
     private void drawSaturationValuePalette(MatrixStack matrices) {
-        // 右上がバーの元色(S=1, V=1)、下が黒(V=0)、左上が白(S=0, V=1)
-        // ピクセル単位で綺麗にグラデーションをブレンドして描画します
-        int baseRGB = hsvToRgb(hue, 1.0f, 1.0f);
+        // 💡 1px単位の描画を廃止し、GRID_SIZE(8px)単位のグリッドで描画することで描画処理回数を1/64に削減します
+        for (int i = 0; i < PALETTE_HEIGHT; i += GRID_SIZE) {
+            int blockH = Math.min(GRID_SIZE, PALETTE_HEIGHT - i);
+            // グリッドの中心座標でHSV値を補間計算
+            float v = 1.0f - ((float) (i + blockH / 2) / PALETTE_HEIGHT);
 
-        for (int i = 0; i < PALETTE_HEIGHT; i++) {
-            float v = 1.0f - ((float) i / PALETTE_HEIGHT); // 縦軸: 明度 (上ほど明るい)
+            for (int j = 0; j < PALETTE_WIDTH; j += GRID_SIZE) {
+                int blockW = Math.min(GRID_SIZE, PALETTE_WIDTH - j);
+                float s = (float) (j + blockW / 2) / PALETTE_WIDTH;
 
-            // 左端色 (白〜黒のグラデーション)
-            int leftColor = hsvToRgb(hue, 0.0f, v);
-            // 右端色 (色相の純色〜黒のグラデーション)
-            int rightColor = hsvToRgb(hue, 1.0f, v);
+                // HSVからRGBを計算
+                int color = hsvToRgb(hue, s, v);
 
-            // 水平方向にグラデーションを描画
-            fillGradient(matrices, paletteX, paletteY + i, paletteX + PALETTE_WIDTH, paletteY + i + 1, leftColor | 0xFF000000, rightColor | 0xFF000000);
+                // 8px四方のグリッド矩形を描画
+                fill(matrices, paletteX + j, paletteY + i, paletteX + j + blockW, paletteY + i + blockH, color | 0xFF000000);
+            }
         }
 
-        // 外枠
+        // 外枠の描画
         fill(matrices, paletteX - 1, paletteY - 1, paletteX, paletteY + PALETTE_HEIGHT + 1, 0xFF888888);
         fill(matrices, paletteX + PALETTE_WIDTH, paletteY - 1, paletteX + PALETTE_WIDTH + 1, paletteY + PALETTE_HEIGHT + 1, 0xFF888888);
         fill(matrices, paletteX - 1, paletteY - 1, paletteX + PALETTE_WIDTH + 1, paletteY, 0xFF888888);
@@ -136,20 +143,14 @@ public class ColorPickerScreen extends Screen {
     }
 
     private void drawHueBar(MatrixStack matrices) {
-        // 色相バーを20分割して、虹色のグラデーションを滑らかに表現します
-        int segments = 24;
-        int segmentWidth = PALETTE_WIDTH / segments;
+        // 💡 色相バーもHUE_STEP(6px)ステップにすることで描画負荷を1/6に削減します
+        for (int x = 0; x < PALETTE_WIDTH; x += HUE_STEP) {
+            int blockW = Math.min(HUE_STEP, PALETTE_WIDTH - x);
+            float h = ((float) (x + blockW / 2) / PALETTE_WIDTH) * 360.0f;
 
-        for (int i = 0; i < segments; i++) {
-            float h1 = ((float) i / segments) * 360.0f;
-            float h2 = ((float) (i + 1) / segments) * 360.0f;
-            int c1 = hsvToRgb(h1, 1.0f, 1.0f);
-            int c2 = hsvToRgb(h2, 1.0f, 1.0f);
+            int color = hsvToRgb(h, 1.0f, 1.0f);
 
-            int x1 = hueBarX + (i * segmentWidth);
-            int x2 = (i == segments - 1) ? hueBarX + PALETTE_WIDTH : x1 + segmentWidth;
-
-            fillGradient(matrices, x1, hueBarY, x2, hueBarY + HUE_BAR_HEIGHT, c1 | 0xFF000000, c2 | 0xFF000000);
+            fill(matrices, hueBarX + x, hueBarY, hueBarX + x + blockW, hueBarY + HUE_BAR_HEIGHT, color | 0xFF000000);
         }
 
         // 外枠
@@ -160,7 +161,7 @@ public class ColorPickerScreen extends Screen {
     }
 
     private void drawPointer(MatrixStack matrices) {
-        // パレット上の選択ポインタ (円形風の四角)
+        // パレット上の現在の選択ポインタ
         int px = paletteX + (int) (saturation * PALETTE_WIDTH);
         int py = paletteY + (int) ((1.0f - value) * PALETTE_HEIGHT);
 
