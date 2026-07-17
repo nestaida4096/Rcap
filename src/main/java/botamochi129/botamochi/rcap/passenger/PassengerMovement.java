@@ -479,6 +479,35 @@ public class PassengerMovement {
                 break;
 
             case ON_TRAIN:
+                // ★追加：スタック判定やワープ処理が絶対に走らないようリセット
+                passenger.stuckTicks = 0;
+
+                // ★追加：誤乗車検知とやり直し処理
+                boolean isCorrectTrain = false;
+                TrainServer currentTrainServer = null;
+                if (passenger.currentTrainId != null) {
+                    for (Siding siding : railwayData.sidings) {
+                        for (TrainServer train : getSidingTrains(siding)) {
+                            if (train.id == passenger.currentTrainId) {
+                                currentTrainServer = train;
+                                if (trainServesRoute(railwayData, train, passenger.scheduledRouteId)) {
+                                    isCorrectTrain = true;
+                                }
+                                break;
+                            }
+                        }
+                        if (currentTrainServer != null) break;
+                    }
+                }
+
+                // 違う路線に乗っている、かつドアがまだ開いている場合は降りてホームでやり直す
+                if (!isCorrectTrain && currentTrainServer != null && currentTrainServer.getDoorValue() > 0.0F) {
+                    LOGGER.warn("[Passenger] {} boarded wrong train! Alighting to retry.", passenger.id);
+                    passenger.moveState = Passenger.MoveState.WAITING_FOR_TRAIN;
+                    resetOnTrainState(passenger);
+                    return;
+                }
+
                 long cur = System.currentTimeMillis();
                 if (passenger.alightTimeMillis > 0 && cur >= passenger.alightTimeMillis && isTrainReadyForAlight(world, railwayData, passenger)) {
                     if (passenger.alightRouteIndex >= 0 && passenger.alightRouteIndex < passenger.route.size() - 1) {
@@ -934,16 +963,27 @@ public class PassengerMovement {
         }
         for (Siding siding : railwayData.sidings) {
             for (TrainServer train : getSidingTrains(siding)) {
+                // ★修正1：車庫線内で新規スポーンした出庫前車両や、現在別路線を走っている車両を確実に除外
+                if (!isTrainActiveOnRoute(train, routeId)) {
+                    continue;
+                }
+
+                // ★修正2：候補路線（Sidingの対応路線）チェックも念のため継続
                 if (!trainServesRoute(railwayData, train, routeId)) {
                     continue;
                 }
-                // 電車ドア判定: ドアが閉まっている途中でも僅かでも開いている(0.0F超)か、MTR側のドアオープン中に引っかかるように調整
-                if (train.getDoorValue() <= 0.0F || Math.abs(train.getSpeed()) > 0.05F) {
+
+                // ドアが少しでも開いていること（速度だけに頼らない）
+                if (train.getDoorValue() <= 0.1F) {
                     continue;
                 }
-                if (isTrainAtPlatform(train, platform)) {
-                    return train;
+
+                // プラットフォームの判定範囲内に停車していることを必須化
+                if (!isTrainAtPlatform(train, platform)) {
+                    continue;
                 }
+
+                return train;
             }
         }
         return null;
@@ -979,6 +1019,46 @@ public class PassengerMovement {
             }
         } catch (Throwable ignored) {}
         return Set.of();
+    }
+
+    /**
+     * 車両が車庫内の待機・新規スポーン車両ではなく、実際に路線上に出庫して運行中かを判定します。
+     */
+    private static boolean isTrainActiveOnRoute(TrainServer train, long expectedRouteId) {
+        if (train == null) return false;
+
+        try {
+            // 1. 車両が現在実際に走っている路線のIDを直接取得して一致確認
+            Field routeIdField = getCachedField(TrainServer.class, "routeId");
+            if (routeIdField != null) {
+                Object value = routeIdField.get(train);
+                if (value instanceof Number number) {
+                    long currentRouteId = number.longValue();
+                    // routeId が 0 や -1 の場合、または目的の路線と異なる場合は「出庫前/別路線」とみなす
+                    if (currentRouteId <= 0 || currentRouteId != expectedRouteId) {
+                        return false;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        try {
+            // 2. MTRの「車庫内待機フラグ」や「運行中フラグ」をリフレクションで安全に確認
+            String[] activeMethods = {"getRailProgress"};
+            for (String methodName : activeMethods) {
+                try {
+                    Method m = train.getClass().getMethod(methodName);
+                    Object res = m.invoke(train);
+                    if (res instanceof Double) {
+                        double railProgress = (Double) res;
+                        return railProgress != 0;
+                    }
+                    break;
+                } catch (NoSuchMethodException ignored) {}
+            }
+        } catch (Throwable ignored) {}
+
+        return true;
     }
 
     private static boolean trainServesRoute(RailwayData railwayData, TrainServer train, long routeId) {
@@ -1280,6 +1360,17 @@ public class PassengerMovement {
         }
         for (Siding siding : railwayData.sidings) {
             for (TrainServer train : getSidingTrains(siding)) {
+                // ★追加：車庫内でドアを開けて止まっているだけの新規スポーン車両を除外
+                try {
+                    Field routeIdField = getCachedField(TrainServer.class, "routeId");
+                    if (routeIdField != null) {
+                        Object value = routeIdField.get(train);
+                        if (value instanceof Number && ((Number) value).longValue() <= 0) {
+                            continue; // RouteIdが割り振られていない出庫前車両はスキップ
+                        }
+                    }
+                } catch (Throwable ignored) {}
+
                 if (train.getDoorValue() > 0.0F || Math.abs(train.getSpeed()) <= 0.05F) {
                     if (isTrainAtPlatform(train, platform)) {
                         return train;

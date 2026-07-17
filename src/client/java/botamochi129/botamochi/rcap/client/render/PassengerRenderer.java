@@ -3,6 +3,7 @@ package botamochi129.botamochi.rcap.client.render;
 import botamochi129.botamochi.rcap.mixin.TrainAccessor;
 import botamochi129.botamochi.rcap.passenger.Passenger;
 import botamochi129.botamochi.rcap.passenger.PassengerManager;
+import botamochi129.botamochi.rcap.passenger.TrainPassengerCountManager; // 新しい管理クラスのインポート
 import mtr.client.ClientData;
 import mtr.data.Platform;
 import mtr.data.TrainClient;
@@ -28,6 +29,17 @@ public class PassengerRenderer {
     private static PassengerModel playerModel = null;
 
     private static final Map<Long, VisualState> visualStates = new HashMap<>();
+
+    // 列車・車両ごとのグリッド割り当て状態を管理するインナークラス
+    private static class TrainGridState {
+        // 乗客ID -> 割り当てられた一意の gridIndex
+        final Map<Long, Integer> passengerGridMap = new HashMap<>();
+        // 割り当て済みのインデックス一覧
+        final Set<Integer> allocatedIndices = new HashSet<>();
+    }
+
+    // 列車・車両のユニークキー (trainId_carIndex) -> グリッド割り当て状態
+    private static final Map<String, TrainGridState> trainGridStates = new HashMap<>();
 
     private static class PositionSample {
         final double x, y, z;
@@ -69,7 +81,16 @@ public class PassengerRenderer {
 
             long now = System.currentTimeMillis();
 
-            final Map<Long, Map<Integer, Set<String>>> frameOccupied = new HashMap<>();
+            // === 2. 列車ごとに乗車している乗客人数を集計し、新しい管理クラスに保存 ===
+            Map<Long, Integer> countsThisFrame = new HashMap<>();
+            for (Passenger passenger : passengers) {
+                if (passenger.moveState == Passenger.MoveState.ON_TRAIN && passenger.currentTrainId != null) {
+                    countsThisFrame.merge(passenger.currentTrainId, 1, Integer::sum);
+                }
+            }
+            TrainPassengerCountManager.clear();
+            countsThisFrame.forEach(TrainPassengerCountManager::setCount);
+            // ==========================================================
 
             final double LONG_CELL = 0.65;
             final double LAT_CELL = 0.35;
@@ -84,8 +105,6 @@ public class PassengerRenderer {
 
                 VisualState vs = visualStates.computeIfAbsent(passenger.id, k -> new VisualState(passenger.x, passenger.y, passenger.z));
 
-                // ★改善：電車に乗っている（ON_TRAIN）か地上にいる（それ以外）かで明確に切り分け、同じ地上グループ内（歩行・待機等）での状態変化では履歴をリセットしない
-                // これにより、状態が往復切り替わりした時のヒストリデータ破綻と乗客の消失バグを100%解決します
                 boolean wasOnTrain = (vs.lastMoveState == Passenger.MoveState.ON_TRAIN);
                 boolean isOnTrain = (passenger.moveState == Passenger.MoveState.ON_TRAIN);
                 if (wasOnTrain != isOnTrain) {
@@ -135,7 +154,6 @@ public class PassengerRenderer {
                                         double spacing = safeGetDoubleField(matchedTrain, "spacing", (double) matchedTrain.spacing);
                                         CarGeometry geometry = getCarGeometry(matchedTrain, i, spacing, new Vec3d(refX, refY, refZ));
 
-                                        // MTRカリング検知：車両の原点が (0,0,0) を指しているか異常値の時はアサインを避ける
                                         if (geometry.center().lengthSquared() < 1.0) continue;
 
                                         Vec3d carCenter = geometry.center();
@@ -171,8 +189,6 @@ public class PassengerRenderer {
                                 Vec3d center = geometry.center();
                                 Vec3d frameForward = geometry.forward();
 
-                                // MTRカリング救済措置：列車の座標計算が明らかに壊れている（(0,0,0)付近に吹き飛んでいる）場合は、
-                                // 電車の位置同期描画から、安定したプラットフォーム線形補間に強制切り替え（カリングでキャラが吹き飛んで消えるバグを解消）
                                 if (center.lengthSquared() < 2.0) {
                                     throw new IllegalStateException("MTR Train Client Geometry is currently culled or unavailable.");
                                 }
@@ -215,18 +231,39 @@ public class PassengerRenderer {
 
                                 double width = safeGetDoubleField(matchedTrain, "width", 2.0);
 
-                                frameOccupied.computeIfAbsent(matchedTrain.id, k -> new HashMap<>());
-                                Map<Integer, Set<String>> trainOcc = frameOccupied.get(matchedTrain.id);
-                                trainOcc.computeIfAbsent(carIdx, k -> new HashSet<>());
-
                                 double usableLength = Math.max(LONG_CELL, spacing - LONGITUDINAL_MARGIN * 2.0);
                                 int intSpacing = Math.max(1, (int) Math.floor(usableLength / LONG_CELL));
                                 double usableWidth = Math.max(LAT_CELL, width - LATERAL_MARGIN * 2.0);
                                 int intWidth = Math.max(1, (int)Math.floor(usableWidth / LAT_CELL));
 
-                                int[] chosen = pickAvailableCellIndex(passenger, matchedTrain, carIdx, intSpacing, intWidth, trainOcc.get(carIdx));
-                                int idxLong = chosen[0];
-                                int idxLat = chosen[1];
+                                // === 1. 一意なグリッド割り当て処理による団子化の防止 ===
+                                String carKey = matchedTrain.id + "_" + carIdx;
+                                TrainGridState gridState = trainGridStates.computeIfAbsent(carKey, k -> new TrainGridState());
+
+                                int gridIndex;
+                                if (gridState.passengerGridMap.containsKey(passenger.id)) {
+                                    gridIndex = gridState.passengerGridMap.get(passenger.id);
+                                } else {
+                                    // 空いている最小のグリッドインデックス（シート・立ち位置番号）を取得
+                                    gridIndex = 0;
+                                    while (gridState.allocatedIndices.contains(gridIndex)) {
+                                        gridIndex++;
+                                    }
+                                    gridState.passengerGridMap.put(passenger.id, gridIndex);
+                                    gridState.allocatedIndices.add(gridIndex);
+                                }
+
+                                // 1対1変換の決定論的ロジック: 配列[0]（gridIndex = 0）を「車両の最も後方かつ最も左側」と明示
+                                // idxLong: longitudinal方向（後方 0 -> 前方 (intSpacing-1)）
+                                // idxLat: lateral方向（左側 0 -> 右側 (intWidth-1)）
+                                int idxLong = gridIndex % intSpacing;
+                                int idxLat = gridIndex / intSpacing;
+
+                                // もしグリッドの容量（シート数）を超過した乗客がいた場合の安全用クランプ
+                                if (idxLat >= intWidth) {
+                                    idxLat = intWidth - 1;
+                                }
+                                // ===================================================
 
                                 double startLong = -((intSpacing - 1) / 2.0) * LONG_CELL;
                                 double startLat = -((intWidth - 1) / 2.0) * LAT_CELL;
@@ -257,7 +294,6 @@ public class PassengerRenderer {
                     }
                 }
 
-                // ★ カリング時および正常な列車同期描画失敗時のフォールバック処理を強化
                 if (passenger.moveState == Passenger.MoveState.ON_TRAIN && !renderSuccessOnTrain) {
                     long bt = passenger.boardingTimeMillis;
                     long at = passenger.alightTimeMillis;
@@ -306,7 +342,7 @@ public class PassengerRenderer {
                             } catch (Throwable t) {
                                 continue;
                             }
-                            if (posRaw.lengthSquared() < 1.0) continue; // カリング時を除外
+                            if (posRaw.lengthSquared() < 1.0) continue;
 
                             double dx = posRaw.x - vs.x;
                             double dy = posRaw.y - vs.y;
@@ -370,8 +406,6 @@ public class PassengerRenderer {
                 }
 
                 if (passenger.moveState != Passenger.MoveState.ON_TRAIN) {
-                    // ★設計変更: ON_TRAIN 以外のすべての地上状態（歩行、待機、IDLE等）で、完全にシームレスな遅延補間を統一適用します。
-                    // これにより、状態が WALKING_TO_PLATFORM -> WAITING_FOR_TRAIN と遷移しても補間履歴データが維持され、乗客が消える問題が完全に解消されます。
                     long renderTime = now - 1000;
 
                     if (vs.history.size() >= 2) {
@@ -412,7 +446,6 @@ public class PassengerRenderer {
                             vs.x = oldest.x; vs.y = oldest.y; vs.z = oldest.z;
                         }
                     } else {
-                        // vs.history.size() < 2
                         double targetX = passenger.x;
                         double targetY = passenger.y;
                         double targetZ = passenger.z;
@@ -465,6 +498,35 @@ public class PassengerRenderer {
             }
 
             visualStates.keySet().retainAll(activePassengerIds);
+
+            // === 1-2. 電車内グリッド割り当てキャッシュのクリーンアップ ===
+            // 現在のフレームにおける「車両キー -> 乗客IDのセット」を構築
+            Map<String, Set<Long>> activeCarPassengers = new HashMap<>();
+            for (Passenger p : passengers) {
+                if (p.moveState == Passenger.MoveState.ON_TRAIN && p.currentTrainId != null && p.currentCarIndex >= 0) {
+                    String carKey = p.currentTrainId + "_" + p.currentCarIndex;
+                    activeCarPassengers.computeIfAbsent(carKey, k -> new HashSet<>()).add(p.id);
+                }
+            }
+
+            // キャッシュデータから、降車した乗客のインデックスを開放
+            Iterator<Map.Entry<String, TrainGridState>> it = trainGridStates.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<String, TrainGridState> entry = it.next();
+                String key = entry.getKey();
+                TrainGridState state = entry.getValue();
+
+                Set<Long> activeIds = activeCarPassengers.get(key);
+                if (activeIds == null || activeIds.isEmpty()) {
+                    it.remove(); // 誰も乗っていない車両の状態はマップから削除
+                } else {
+                    // 車両から降車・移動した乗客のグリッドインデックス割り当てを解除
+                    state.passengerGridMap.keySet().retainAll(activeIds);
+                    state.allocatedIndices.clear();
+                    state.allocatedIndices.addAll(state.passengerGridMap.values());
+                }
+            }
+            // ========================================================
         });
     }
 
@@ -499,7 +561,7 @@ public class PassengerRenderer {
             if (trainClient == null) continue;
             try {
                 Vec3d posRaw = ((TrainAccessor) trainClient).callGetRoutePosition(0, trainClient.spacing);
-                if (posRaw.lengthSquared() < 1.0) continue; // 異常座標を除外
+                if (posRaw.lengthSquared() < 1.0) continue;
 
                 double dx = posRaw.x - refX;
                 double dy = posRaw.y - refY;
@@ -687,40 +749,6 @@ public class PassengerRenderer {
             } catch (Throwable ignored) {}
         }
         return bestVec;
-    }
-
-    private static int[] pickAvailableCellIndex(Passenger passenger, TrainClient trainClient, int carIndex, int intSpacing, int intWidth, Set<String> occupiedSet) {
-        if (occupiedSet == null) occupiedSet = new HashSet<>();
-        long seed = passenger.id ^ (trainClient.id * 31L) ^ (carIndex * 131);
-        Random r = new Random(seed);
-        int idxLongInit = r.nextInt(intSpacing);
-        int idxLatInit = r.nextInt(intWidth);
-
-        int maxAttempts = intSpacing * intWidth;
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            int idxLong = (idxLongInit + attempt) % intSpacing;
-            int idxLat = (idxLatInit + (attempt / intSpacing)) % intWidth;
-            if (idxLong < 0) idxLong += intSpacing;
-            if (idxLat < 0) idxLat += intWidth;
-
-            String key = idxLong + "," + idxLat;
-            if (!occupiedSet.contains(key)) {
-                occupiedSet.add(key);
-                return new int[]{idxLong, idxLat};
-            }
-        }
-
-        for (int i = 0; i < intSpacing; i++) {
-            for (int j = 0; j < intWidth; j++) {
-                String key = i + "," + j;
-                if (!occupiedSet.contains(key)) {
-                    occupiedSet.add(key);
-                    return new int[]{i, j};
-                }
-            }
-        }
-
-        return new int[]{idxLongInit, idxLatInit};
     }
 
     private static Vec3d getCarInteriorCenter(Vec3d carAnchor, Vec3d frameForward, double spacing, Vec3d reference) {
