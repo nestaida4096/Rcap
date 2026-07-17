@@ -24,57 +24,63 @@ public class RouteDepotSelectScreen extends Screen {
 
     private RouteDepotListWidget listWidget;
 
-    // 💡 定数
-    private static final int LIST_WIDTH = 300;
-    private static final int LIST_HEIGHT = 120;
-    private static final int ENTRY_HEIGHT = 24;
-    private static final int MARGIN_Y = 60;
+    // 💡 UI配置用定数（レスポンシブ設計に基づき可変）
+    private static final int MAX_LIST_WIDTH = 320;
+    private static final int ENTRY_HEIGHT = 20;
+    private static final int HEADER_HEIGHT = 40; // タイトル用マージン
+    private static final int FOOTER_HEIGHT = 48; // ボタン用マージン
 
-    private List<Long> selectedIds;
+    private final List<Long> selectedIds;
 
     public RouteDepotSelectScreen(Screen parentScreen, List<Long> selectedIds, boolean isRoute, Consumer<List<Long>> onConfirm) {
         super(Text.literal(isRoute ? "路線選択" : "車庫選択"));
         this.parentScreen = parentScreen;
         this.isRoute = isRoute;
         this.onConfirm = onConfirm;
-        this.selectedIds = new ArrayList<>(selectedIds); // ← 💫 deep copy で保持！
+        this.selectedIds = new ArrayList<>(selectedIds); // 💫 初期選択状態を保持
     }
 
     @Override
     protected void init() {
         int centerX = this.width / 2;
 
-        // 📌 中央配置
-        int listX = centerX - LIST_WIDTH / 2;
-        int listBottom = this.height - MARGIN_Y;
-        int listTop = listBottom - LIST_HEIGHT;
+        // 📌 画面幅に応じてリスト幅をレスポンシブに調整（画面が狭い場合は画面端にマージンを残す）
+        int listWidth = Math.min(MAX_LIST_WIDTH, this.width - 40);
+        int listX = centerX - listWidth / 2;
+        int listTop = HEADER_HEIGHT;
+        int listBottom = this.height - FOOTER_HEIGHT;
 
-        listWidget = new RouteDepotListWidget(MinecraftClient.getInstance(), LIST_WIDTH, this.height, listTop, listBottom, ENTRY_HEIGHT);
+        // リストウィジェットの生成
+        listWidget = new RouteDepotListWidget(MinecraftClient.getInstance(), listWidth, this.height, listTop, listBottom, ENTRY_HEIGHT);
         listWidget.setRenderX(listX);
         setListEntries();
 
+        // 描画・選択対象として登録
         addDrawableChild(listWidget);
         addSelectableChild(listWidget);
 
-        // ✅ ボタン配置（画面下中央に配置）
-        final int buttonWidth = 98;
+        // ✅ 下部ボタンの配置（レスポンシブ幅で中央揃えに2つ並べる）
+        final int buttonWidth = Math.min(100, (listWidth - 8) / 2);
         final int buttonHeight = 20;
-        final int buttonY = this.height - buttonHeight - 20;
+        final int buttonY = this.height - 32;
 
-        // OK
+        // OK ボタン
         addDrawableChild(new ButtonWidget(
-                centerX - buttonWidth - 2, buttonY, buttonWidth, buttonHeight,
+                centerX - buttonWidth - 4, buttonY, buttonWidth, buttonHeight,
                 Text.literal("OK"),
                 btn -> {
-                    List<Long> selected = listWidget.entries.stream().filter(e -> e.selected).map(e -> e.id).toList();
+                    List<Long> selected = listWidget.entries.stream()
+                            .filter(e -> e.selected)
+                            .map(e -> e.id)
+                            .toList();
                     onConfirm.accept(selected);
-                    MinecraftClient.getInstance().setScreen(parentScreen);// 🔍 ログ追加：
+                    MinecraftClient.getInstance().setScreen(parentScreen);
                     System.out.println("[RCAP] OKボタン押下 - 選択されたID: " + selected);
                 }));
 
-        // キャンセル
+        // キャンセル ボタン
         addDrawableChild(new ButtonWidget(
-                centerX + 2, buttonY, buttonWidth, buttonHeight,
+                centerX + 4, buttonY, buttonWidth, buttonHeight,
                 Text.literal("キャンセル"),
                 btn -> MinecraftClient.getInstance().setScreen(parentScreen)));
     }
@@ -97,10 +103,12 @@ public class RouteDepotSelectScreen extends Screen {
     public void render(MatrixStack matrices, int mouseX, int mouseY, float delta) {
         renderBackground(matrices);
 
-        // ✅ タイトル中央表示
-        drawCenteredText(matrices, textRenderer, title, width / 2, 15, 0xFFFFFF);
-
+        // リストの描画
         listWidget.render(matrices, mouseX, mouseY, delta);
+
+        // 画面タイトルの描画（中央上部）
+        drawCenteredText(matrices, textRenderer, title, this.width / 2, 15, 0xFFFFFF);
+
         super.render(matrices, mouseX, mouseY, delta);
     }
 
@@ -109,7 +117,7 @@ public class RouteDepotSelectScreen extends Screen {
         return false;
     }
 
-    // 📦 リスト本体
+    // 📦 路線・車庫リスト本体
     static class RouteDepotListWidget extends EntryListWidget<SelectableEntry> {
         public final List<SelectableEntry> entries = new ArrayList<>();
 
@@ -129,10 +137,20 @@ public class RouteDepotSelectScreen extends Screen {
         }
 
         @Override
+        public int getRowWidth() {
+            return this.width;
+        }
+
+        @Override
+        protected int getScrollbarPositionX() {
+            return this.right - 6;
+        }
+
+        @Override
         public void appendNarrations(NarrationMessageBuilder builder) {}
     }
 
-    // 📦 個別選択項目
+    // 📦 個別選択項目 (エントリ)
     static class SelectableEntry extends EntryListWidget.Entry<SelectableEntry> {
         public final long id;
         public final String name;
@@ -147,25 +165,46 @@ public class RouteDepotSelectScreen extends Screen {
         @Override
         public void render(MatrixStack matrices, int index, int y, int x, int width, int height,
                            int mouseX, int mouseY, boolean hovered, float delta) {
-            int bgColor = hovered ? 0xFF555555 : 0xFF202020;
+            int bgColor = 0x2A000000;
+            if (selected) {
+                bgColor = hovered ? 0x80336633 : 0x60224422; // 選択中は緑がかった半透明
+            } else if (hovered) {
+                bgColor = 0x50FFFFFF; // ホバー時は明るい半透明
+            }
             fill(matrices, x, y, x + width, y + height, bgColor);
+
+            if (selected) {
+                fill(matrices, x, y, x + 2, y + height, 0xFF4CAF50); // 左端に緑のアクセントライン
+            }
 
             MinecraftClient client = MinecraftClient.getInstance();
             TextRenderer font = client.textRenderer;
 
-            String checkbox = selected ? "✔" : "□";
-            String text = checkbox + " " + name;
+            String checkbox = selected ? "[✔]" : "[ ]";
+            int checkboxColor = selected ? 0x4CAF50 : 0x888888;
 
-            int textWidth = font.getWidth(text);
-            int centerX = x + (width - textWidth) / 2;
+            int checkboxX = x + 8;
+            int textY = y + (height - 8) / 2;
 
-            font.drawWithShadow(matrices, text, centerX, y + 6, 0xFFFFFF);
+            font.drawWithShadow(matrices, checkbox, checkboxX, textY, checkboxColor);
+
+            int textX = checkboxX + font.getWidth("[✔] ") + 4;
+            String displayName = font.trimToWidth(name, width - (textX - x) - 8);
+            font.drawWithShadow(matrices, displayName, textX, textY, 0xFFFFFF);
         }
 
         @Override
         public boolean mouseClicked(double mouseX, double mouseY, int button) {
-            selected = !selected;
-            return true;
+            if (button == 0) {
+                this.selected = !this.selected;
+                MinecraftClient.getInstance().getSoundManager().play(
+                        net.minecraft.client.sound.PositionedSoundInstance.master(
+                                net.minecraft.sound.SoundEvents.UI_BUTTON_CLICK, 1.0F
+                        )
+                );
+                return true;
+            }
+            return false;
         }
     }
 }

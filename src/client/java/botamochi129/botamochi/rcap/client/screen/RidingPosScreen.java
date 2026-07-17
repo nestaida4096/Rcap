@@ -21,7 +21,7 @@ import java.util.*;
 
 public class RidingPosScreen extends Screen {
 
-    private static final int LIST_WIDTH = 300;
+    private static final int MAX_LIST_WIDTH = 300;
     private static final int ITEM_HEIGHT = 20;
 
     private final RidingPosBlockEntity blockEntity;
@@ -32,6 +32,8 @@ public class RidingPosScreen extends Screen {
 
     private final Set<Long> selectedPlatformIds = new HashSet<>();
     private List<Platform> nearbyPlatforms = new ArrayList<>();
+
+    private int listWidth;
 
     public RidingPosScreen(RidingPosBlockEntity blockEntity) {
         super(Text.literal("乗車位置設定"));
@@ -47,11 +49,14 @@ public class RidingPosScreen extends Screen {
         }
 
         MinecraftClient mc = MinecraftClient.getInstance();
-        int listX = (width - LIST_WIDTH) / 2;
-        int listY = 40;
-        int listHeight = height - 100;
 
-        platformList = new ScrollablePlatformList(mc, LIST_WIDTH, listHeight, listY, listY + listHeight, ITEM_HEIGHT);
+        // 📌 リストの横幅を画面サイズに応じてレスポンシブ化
+        this.listWidth = Math.min(MAX_LIST_WIDTH, this.width - 40);
+        int listX = (this.width - this.listWidth) / 2;
+        int listY = 40;
+        int listHeight = this.height - 90; // 下部ボタンの高さ(40)に配慮して動的に計算
+
+        platformList = new ScrollablePlatformList(mc, this.listWidth, listHeight, listY, listY + listHeight, ITEM_HEIGHT);
         platformList.setRenderBackground(false);
         platformList.setLeftPos(listX);
         addSelectableChild(platformList);
@@ -73,16 +78,18 @@ public class RidingPosScreen extends Screen {
 
         for (Platform platform : nearbyPlatforms) {
             boolean checked = selectedPlatformIds.contains(platform.id);
-            platformList.addPublicEntry(new PlatformEntry(platform.name + "（ID: " + platform.id + "）", platform.id, checked));
+            // チェックボックス幅もリスト幅に合わせて動的にアジャスト
+            platformList.addPublicEntry(new PlatformEntry(platform.name + "（ID: " + platform.id + "）", platform.id, checked, this.listWidth));
         }
 
         addSaveButton();
     }
 
     private void addSaveButton() {
-        int bx = (this.width - 100) / 2;
-        int by = this.height - 40;
-        saveButton = new ButtonWidget(bx, by, 100, 20, Text.literal("保存"), b -> closeWithSave());
+        int buttonWidth = 100;
+        int bx = (this.width - buttonWidth) / 2;
+        int by = this.height - 35;
+        saveButton = new ButtonWidget(bx, by, buttonWidth, 20, Text.literal("保存"), b -> closeWithSave());
         addDrawableChild(saveButton);
     }
 
@@ -97,9 +104,7 @@ public class RidingPosScreen extends Screen {
             }
         }
 
-        // ここを直接 ClientNetworking の送信メソッドにする
         ClientNetworking.sendUpdatePlatformIdPacket(blockPos, selectedId);
-
         MinecraftClient.getInstance().setScreen(null);
     }
 
@@ -107,9 +112,6 @@ public class RidingPosScreen extends Screen {
         return blockPos;
     }
 
-    /**
-     * サーバから送られた platformId を GUI の選択チェックボックスに反映する
-     */
     public void updateSelectedPlatform(long platformId) {
         if (platformList == null) {
             return;
@@ -143,23 +145,23 @@ public class RidingPosScreen extends Screen {
     }
 
     // ---------- スクロール対応リスト ----------
-    private static class ScrollablePlatformList extends EntryListWidget<PlatformEntry> {
+    private class ScrollablePlatformList extends EntryListWidget<PlatformEntry> {
         public ScrollablePlatformList(MinecraftClient client, int width, int height, int top, int bottom, int itemHeight) {
             super(client, width, height, top, bottom, itemHeight);
         }
 
         public void addPublicEntry(PlatformEntry entry) {
-            super.addEntry(entry); // protected → 公開
+            super.addEntry(entry);
         }
 
         @Override
         protected int getScrollbarPositionX() {
-            return getRowLeft() + LIST_WIDTH - 8;
+            return getRowLeft() + this.width - 8;
         }
 
         @Override
         public int getRowWidth() {
-            return LIST_WIDTH;
+            return this.width;
         }
 
         @Override
@@ -170,10 +172,12 @@ public class RidingPosScreen extends Screen {
     public static class PlatformEntry extends EntryListWidget.Entry<PlatformEntry> {
         public final long platformId;
         public final MyCheckboxWidget checkbox;
+        private final int listWidth;
 
-        public PlatformEntry(String label, long platformId, boolean selected) {
+        public PlatformEntry(String label, long platformId, boolean selected, int listWidth) {
             this.platformId = platformId;
-            this.checkbox = new MyCheckboxWidget(0, 0, LIST_WIDTH - 10, ITEM_HEIGHT, Text.literal(label), selected);
+            this.listWidth = listWidth;
+            this.checkbox = new MyCheckboxWidget(0, 0, listWidth - 10, ITEM_HEIGHT, Text.literal(label), selected);
         }
 
         @Override
@@ -181,11 +185,11 @@ public class RidingPosScreen extends Screen {
             return checkbox.mouseClicked(mouseX, mouseY, button);
         }
 
-        public List<? extends Element> children() {
+        public List<MyCheckboxWidget> children() {
             return List.of(checkbox);
         }
 
-        public List<? extends Selectable> selectableChildren() {
+        public List<MyCheckboxWidget> selectableChildren() {
             return List.of(checkbox);
         }
 
@@ -205,10 +209,8 @@ public class RidingPosScreen extends Screen {
         }
 
         public void setChecked(boolean value) {
-            // Yarn mappingでは setChecked などが存在しないため「トグル処理」を真似る
             if (value != isChecked()) {
-                // 状態を逆転させる＝ボタンを押された時と同じ処理
-                this.onPress(); // これで内部 checked 状態が切り替わる
+                this.onPress();
             }
         }
 

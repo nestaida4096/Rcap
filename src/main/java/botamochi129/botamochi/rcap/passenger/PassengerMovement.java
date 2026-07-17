@@ -14,6 +14,7 @@ import net.minecraft.block.Blocks;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.tag.BlockTags;
+import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Vec3d;
@@ -22,8 +23,6 @@ import org.apache.logging.log4j.Logger;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -45,7 +44,7 @@ public class PassengerMovement {
 
     // 探索最大半径を32に設定。歩行パケットとして十分な長さ。
     private static final int WALK_PATH_MAX_DISTANCE = 32;
-    private static final double TRAIN_PLATFORM_MATCH_DISTANCE_SQ = 144.0;
+    private static final double TRAIN_PLATFORM_MATCH_DISTANCE_SQ = 225.0; // 判定距離を12mから15mへ少し緩めて検出しやすく修正 (144.0 -> 225.0)
     private static final double[] WALKING_LANES = {-0.45, -0.25, 0.0, 0.25, 0.45};
 
     private static final int STUCK_THRESHOLD_TICKS = 200; // 約10秒間動けない場合にスタックと判定
@@ -199,20 +198,21 @@ public class PassengerMovement {
         } finally {
             if (botamochi129.botamochi.rcap.Rcap.passengerStateLogEnabled && prevState != passenger.moveState) {
                 MinecraftServer server = world.getServer();
-
-                LocalDateTime nowDate = LocalDateTime.now();
-                System.out.println(nowDate); //2020-12-20T13:32:48.293
-
-                DateTimeFormatter dtf1 =
-                        DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss.SSS");
-                String formatNowDate = dtf1.format(nowDate);
-
                 if (server != null) {
                     net.minecraft.text.Text msg = net.minecraft.text.Text.literal(
-                            "§7"+formatNowDate+": §b[Passenger Log] §f" + passenger.name + " (" + passenger.id + "): §7" + prevState + " §f-> §a" + passenger.moveState
+                            "§b[Passenger Log] §f" + passenger.name + " (" + passenger.id + "): §7" + prevState + " §f-> §a" + passenger.moveState
                     );
                     server.getPlayerManager().broadcast(msg, false);
                 }
+            }
+        }
+    }
+
+    private static void logToChat(ServerWorld world, String message) {
+        if (botamochi129.botamochi.rcap.Rcap.passengerStateLogEnabled) {
+            MinecraftServer server = world.getServer();
+            if (server != null) {
+                server.getPlayerManager().broadcast(Text.literal("§e[Boarding Debug] §f" + message), false);
             }
         }
     }
@@ -369,8 +369,7 @@ public class PassengerMovement {
                     return;
                 }
 
-                // ★修正：WAITING_FOR_TRAIN 状態を維持したまま、新たに指定された乗車位置へ滑らかに移動する
-                // これにより、WAITING_FOR_TRAIN -> WALKING_TO_PLATFORM の不自然な逆戻り（状態フリッカー）を防ぎます。
+                // WAITING_FOR_TRAIN 状態を維持したまま、新たに指定された乗車位置へ滑らかに移動する
                 if (distanceSqXZ > 0.16) {
                     walkTowards(world, passenger, standingTargetPos, walkSpeed);
                 } else {
@@ -385,18 +384,48 @@ public class PassengerMovement {
 
                 long now = System.currentTimeMillis();
                 List<ScheduleEntry> schedules = railwayData.getSchedulesAtPlatform(targetPlatformId);
+
+                // 【デバッグ出力2】 schedulesがnullかどうかの確認
+                if (schedules == null) {
+                    logToChat(world, passenger.name + ": schedules is null at platform " + targetPlatformId);
+                } else if (schedules.isEmpty()) {
+                    logToChat(world, passenger.name + ": schedules is empty at platform " + targetPlatformId);
+                }
+
                 ScheduleEntry matched = null;
                 AlightPlan alightPlan = null;
 
                 if (schedules != null) {
                     for (ScheduleEntry s : schedules) {
                         try {
-                            if (s.arrivalMillis <= now) {
-                                if (expectedRouteId > 0 && s.routeId != expectedRouteId) {
+                            // 【デバッグ出力3】判定項目的ダンプ
+                            boolean timeOk = (s.arrivalMillis - 10000L <= now); // 余裕を10秒に拡大 (5秒から変更)
+                            boolean routeIdOk = (expectedRouteId <= 0 || s.routeId == expectedRouteId);
+
+                            // ★物理車両停車チェックによる超強化: すでに目の前に物理的な列車が停車していれば、時刻判定をスキップして進める
+                            TrainServer physTrain = findBoardableTrain(world, railwayData, targetPlatformId, s.routeId, targetPos);
+                            if (physTrain != null) {
+                                timeOk = true;
+                                logToChat(world, passenger.name + ": Physically stopped train detected! Forcing timeOk = true");
+                            }
+
+                            logToChat(world, String.format(
+                                    "%s: schedule: routeId=%d, expectedRouteId=%d, arrival=%d, now=%d, timeDiff=%d (timeOk=%b, routeIdOk=%b)",
+                                    passenger.name, s.routeId, expectedRouteId, s.arrivalMillis, now, (now - s.arrivalMillis), timeOk, routeIdOk
+                            ));
+
+                            if (timeOk) {
+                                if (!routeIdOk) {
                                     continue;
                                 }
                                 AlightPlan candidatePlan = findAlightPlan(railwayData, passenger, s);
-                                TrainServer boardableTrain = candidatePlan == null ? null : findBoardableTrain(world, railwayData, targetPlatformId, s.routeId, targetPos);
+
+                                logToChat(world, passenger.name + ": candidatePlan of routeId " + s.routeId + " is " + (candidatePlan == null ? "null" : "non-null (" + candidatePlan.platformId + ")"));
+
+                                TrainServer boardableTrain = physTrain != null ? physTrain : findBoardableTrain(world, railwayData, targetPlatformId, s.routeId, targetPos);
+
+                                logToChat(world, passenger.name + ": boardableTrain is " + (boardableTrain == null ? "null" : "ID:" + boardableTrain.id));
+
                                 if (candidatePlan != null && boardableTrain != null) {
                                     matched = s;
                                     alightPlan = candidatePlan;
@@ -405,8 +434,17 @@ public class PassengerMovement {
                                 }
                             }
                         } catch (Throwable t) {
+                            logToChat(world, passenger.name + ": exception in schedules loop: " + t.getMessage());
                         }
                     }
+                }
+
+                // 【デバッグ出力1】matched, alightPlanのチェック
+                if (matched != null || alightPlan != null) {
+                    logToChat(world, String.format(
+                            "%s: WAITING check -> matched=%b, alightPlan=%b",
+                            passenger.name, (matched != null), (alightPlan != null)
+                    ));
                 }
 
                 if (matched != null && alightPlan != null) {
@@ -695,48 +733,81 @@ public class PassengerMovement {
     }
 
     private static AlightPlan findAlightPlanUncached(RailwayData railwayData, Passenger passenger, ScheduleEntry boardingSchedule) {
+        // 降車先（乗客の route リスト上の次の降車駅）の検証ロジックを確実に処理
         for (int alightIndex = passenger.routeTargetIndex + 1; alightIndex < passenger.route.size(); alightIndex++) {
             long alightPlatformId = passenger.route.get(alightIndex);
-            List<ScheduleEntry> alightSchedules = railwayData.getSchedulesAtPlatform(alightPlatformId);
-            if (alightSchedules == null || alightSchedules.isEmpty()) {
+
+            Platform alightPlatform = railwayData.dataCache.platformIdMap.get(alightPlatformId);
+            if (alightPlatform == null) {
                 continue;
             }
 
-            long bestArrival = Long.MAX_VALUE;
-            for (ScheduleEntry alightSchedule : alightSchedules) {
-                try {
-                    if (alightSchedule.routeId != boardingSchedule.routeId) {
-                        continue;
+            // ★超強化: 次の予定プラットフォームが別路線のホームであっても、今乗る路線と同じ駅(Station)であるなら、
+            // その同じ駅の「今乗る路線側のプラットフォームID」を一時的・仮想的に検索し、そのホームに到着するかどうかを判定可能にします。
+            long resolvedAlightPlatformId = alightPlatformId;
+            var alightStation = railwayData.dataCache.platformIdToStation.get(alightPlatformId);
+            if (alightStation != null) {
+                // 同じ駅内のすべてのホームをチェックし、今乗っている路線のスケジュールが存在するホームがあれば、それを実際の降車予定駅に紐付けます
+                for (Map.Entry<Long, mtr.data.Station> entry : railwayData.dataCache.platformIdToStation.entrySet()) {
+                    if (entry.getValue() != null && entry.getValue().id == alightStation.id) {
+                        long siblingPlatformId = entry.getKey();
+                        List<ScheduleEntry> siblingSchedules = railwayData.getSchedulesAtPlatform(siblingPlatformId);
+                        if (siblingSchedules != null) {
+                            for (ScheduleEntry checkS : siblingSchedules) {
+                                if (checkS.routeId == boardingSchedule.routeId && checkS.currentStationIndex > boardingSchedule.currentStationIndex) {
+                                    resolvedAlightPlatformId = siblingPlatformId;
+                                    break;
+                                }
+                            }
+                        }
                     }
-                    if (alightSchedule.arrivalMillis <= boardingSchedule.arrivalMillis) {
-                        continue;
-                    }
-                    if (alightSchedule.currentStationIndex <= boardingSchedule.currentStationIndex) {
-                        continue;
-                    }
-                    if (alightSchedule.arrivalMillis < bestArrival) {
-                        bestArrival = alightSchedule.arrivalMillis;
-                    }
-                } catch (Throwable ignored) {
                 }
             }
 
-            if (bestArrival == Long.MAX_VALUE) {
-                continue;
+            Platform resolvedAlightPlatform = railwayData.dataCache.platformIdMap.get(resolvedAlightPlatformId);
+            if (resolvedAlightPlatform == null) {
+                resolvedAlightPlatform = alightPlatform;
             }
 
-            Platform alightPlatform = railwayData.dataCache.platformIdMap.get(alightPlatformId);
+            List<ScheduleEntry> alightSchedules = railwayData.getSchedulesAtPlatform(resolvedAlightPlatformId);
+            long bestArrival = Long.MAX_VALUE;
+
+            if (alightSchedules != null) {
+                for (ScheduleEntry alightSchedule : alightSchedules) {
+                    try {
+                        if (alightSchedule.routeId != boardingSchedule.routeId) {
+                            continue;
+                        }
+                        // スケジュール予測の前後関係を判定
+                        if (alightSchedule.currentStationIndex <= boardingSchedule.currentStationIndex) {
+                            continue;
+                        }
+                        if (alightSchedule.arrivalMillis < bestArrival) {
+                            bestArrival = alightSchedule.arrivalMillis;
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+
+            // スケジュールミリ秒データが見つからない/異常値の場合でも、同一路線（routeId）を共有する駅なら安全に降車を可能にするフォールバック
+            if (bestArrival == Long.MAX_VALUE) {
+                bestArrival = boardingSchedule.arrivalMillis > 0
+                        ? boardingSchedule.arrivalMillis + 60000L * (alightIndex - passenger.routeTargetIndex)
+                        : System.currentTimeMillis() + 60000L * (alightIndex - passenger.routeTargetIndex);
+            }
+
             double alightX = Double.NaN;
             double alightY = Double.NaN;
             double alightZ = Double.NaN;
-            if (alightPlatform != null) {
-                BlockPos mid = alightPlatform.getMidPos();
+            BlockPos mid = resolvedAlightPlatform.getMidPos();
+            if (mid != null) {
                 alightX = mid.getX() + 0.5;
                 alightY = mid.getY() + 1.0;
                 alightZ = mid.getZ() + 0.5;
             }
 
-            return new AlightPlan(alightPlatformId, bestArrival, alightIndex, alightX, alightY, alightZ);
+            return new AlightPlan(resolvedAlightPlatformId, bestArrival, alightIndex, alightX, alightY, alightZ);
         }
         return null;
     }
@@ -839,7 +910,7 @@ public class PassengerMovement {
             double horizontalDistSq = dx * dx + dz * dz;
             double verticalDist = Math.abs(dy);
 
-            if (horizontalDistSq <= 3.0 * 3.0 && verticalDist <= 2.0) {
+            if (horizontalDistSq <= TRAIN_PLATFORM_MATCH_DISTANCE_SQ && verticalDist <= 3.0) { // 許容高さを2.0mから3.0mに拡大
                 return true;
             }
         }
@@ -866,6 +937,7 @@ public class PassengerMovement {
                 if (!trainServesRoute(railwayData, train, routeId)) {
                     continue;
                 }
+                // 電車ドア判定: ドアが閉まっている途中でも僅かでも開いている(0.0F超)か、MTR側のドアオープン中に引っかかるように調整
                 if (train.getDoorValue() <= 0.0F || Math.abs(train.getSpeed()) > 0.05F) {
                     continue;
                 }

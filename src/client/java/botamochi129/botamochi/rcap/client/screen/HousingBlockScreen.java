@@ -21,6 +21,9 @@ public class HousingBlockScreen extends HandledScreen<HousingBlockScreenHandler>
     private final List<OfficeChoice> officeChoices = new ArrayList<>();
     private int selectedOfficeIndex = 0;
 
+    private static final int WIDGET_WIDTH = 200;
+    private static final int WIDGET_HEIGHT = 20;
+
     public HousingBlockScreen(HousingBlockScreenHandler handler, PlayerInventory inventory, Text title) {
         super(handler, inventory, title);
     }
@@ -30,10 +33,12 @@ public class HousingBlockScreen extends HandledScreen<HousingBlockScreenHandler>
         super.init();
         this.householdSize = handler.getHouseholdSize();
 
-        int x = this.width / 2 - 100;
-        int y = this.height / 2 - 20;
+        int centerX = this.width / 2;
+        int startY = this.height / 2 - 35; // 縦方向の配置を中央にバランスよく分散
 
-        HouseholdSliderWidget slider = new HouseholdSliderWidget(x, y, 120, 20, handler.getHouseholdSize());
+        // スライダー (幅を200にして統一感を持たせる)
+        HouseholdSliderWidget slider = new HouseholdSliderWidget(centerX - WIDGET_WIDTH / 2, startY, WIDGET_WIDTH, WIDGET_HEIGHT, handler.getHouseholdSize());
+
         officeChoices.clear();
         officeChoices.add(new OfficeChoice(HousingBlockPacketReceiver.RANDOM_OFFICE_SENTINEL, "ランダム"));
         for (HousingBlockScreenHandler.OfficeOption option : handler.getOfficeOptions()) {
@@ -42,7 +47,9 @@ public class HousingBlockScreen extends HandledScreen<HousingBlockScreenHandler>
         selectedOfficeIndex = getInitialOfficeIndex(handler.getLinkedOfficePosLong());
 
         this.addDrawableChild(slider);
-        ButtonWidget officeButton = new ButtonWidget(x, y + 30, 200, 20, Text.literal(getSelectedOfficeLabel()), button -> {
+
+        // 勤務先ボタン (幅200)
+        ButtonWidget officeButton = new ButtonWidget(centerX - WIDGET_WIDTH / 2, startY + 30, WIDGET_WIDTH, WIDGET_HEIGHT, Text.literal(getSelectedOfficeLabel()), button -> {
             if (!officeChoices.isEmpty()) {
                 selectedOfficeIndex = (selectedOfficeIndex + 1) % officeChoices.size();
                 button.setMessage(Text.literal(getSelectedOfficeLabel()));
@@ -50,7 +57,8 @@ public class HousingBlockScreen extends HandledScreen<HousingBlockScreenHandler>
         });
         this.addDrawableChild(officeButton);
 
-        this.addDrawableChild(new ButtonWidget(x, y + 60, 60, 20, Text.literal("決定"), button -> {
+        // 決定ボタン (幅を200に統一してセンタリング)
+        this.addDrawableChild(new ButtonWidget(centerX - WIDGET_WIDTH / 2, startY + 60, WIDGET_WIDTH, WIDGET_HEIGHT, Text.literal("決定"), button -> {
             if (client != null && client.player != null && client.world != null) {
                 PacketByteBuf buf = PacketByteBufs.create();
                 buf.writeBlockPos(this.handler.getPos());
@@ -68,8 +76,13 @@ public class HousingBlockScreen extends HandledScreen<HousingBlockScreenHandler>
     public void render(MatrixStack matrices, int mouseX, int mouseY, float delta) {
         this.renderBackground(matrices);
         super.render(matrices, mouseX, mouseY, delta);
-        drawCenteredText(matrices, this.textRenderer, this.title, this.width / 2, this.height / 2 - 50, 0xFFFFFF);
-        drawTextWithShadow(matrices, this.textRenderer, Text.literal("勤務先"), this.width / 2 - 100, this.height / 2 + 15, 0xFFFFFF);
+
+        // タイトルとラベルの位置をコントロール
+        int centerX = this.width / 2;
+        int startY = this.height / 2 - 35;
+
+        drawCenteredText(matrices, this.textRenderer, this.title, centerX, startY - 20, 0xFFFFFF);
+        drawTextWithShadow(matrices, this.textRenderer, Text.literal("勤務先設定"), centerX - WIDGET_WIDTH / 2, startY + 18, 0xAAAAAA);
     }
 
     @Override
