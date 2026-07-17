@@ -30,11 +30,22 @@ import net.minecraft.block.entity.BlockEntityType;
 import net.minecraft.item.BlockItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemGroup;
+import net.minecraft.particle.ParticleTypes;
 import net.minecraft.server.command.CommandManager;
+import net.minecraft.server.network.ServerPlayerEntity;
 import net.minecraft.server.world.ServerWorld;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.registry.Registry;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class Rcap implements ModInitializer {
     public static final String MOD_ID = "rcap";
@@ -44,6 +55,14 @@ public class Rcap implements ModInitializer {
     public static BlockEntityType<HousingBlockEntity> HOUSING_BLOCK_ENTITY;
     public static final Block RIDING_POS_BLOCK = new RidingPosBlock(FabricBlockSettings.of(Material.STONE).strength(2.0f));
     public static BlockEntityType<RidingPosBlockEntity> RIDING_POS_BLOCK_ENTITY;
+
+    public static final Logger LOGGER = LogManager.getLogger();
+
+    // 経路デバッグが有効なプレイヤーのUUIDを保持するスレッドセーフなセット
+    private static final Set<UUID> debugPathPlayers = ConcurrentHashMap.newKeySet();
+
+    // 乗客状態ログが有効かどうか
+    public static boolean passengerStateLogEnabled = false;
 
     @Override
     public void onInitialize() {
@@ -87,11 +106,14 @@ public class Rcap implements ModInitializer {
         });
 
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
-            CompanyManager.save(); // ← 忘れずに追加！
+            CompanyManager.save();
         });
 
-        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             HousingManager.clear();
+            if (handler.getPlayer() != null) {
+                debugPathPlayers.remove(handler.getPlayer().getUuid());
+            }
         });
 
         HousingBlockPacketReceiver.register();
@@ -103,68 +125,144 @@ public class Rcap implements ModInitializer {
         });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
-            // サンプル: 乗客ランダム移動処理やAI・状態更新
-            // for(Passenger p: PassengerManager.PASSENGER_LIST) { ...update p.x, p.y, p.z... }
-
-            // 一定tickごとに全クライアントへ同期
-            if (server.getTicks() % 20 == 0) { // 20tick=1秒ごと
+            if (server.getTicks() % 2 == 0) {
                 PassengerManager.broadcastToAllPlayers(server);
             }
         });
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
+            long tickCount = server.getTicks();
+
             for (ServerWorld w : server.getWorlds()) {
                 long time = w.getTimeOfDay();
 
-                // 住宅から乗客スポーン処理
-                for (HousingBlockEntity house : HousingManager.getAll(w)) {
-                    house.spawnPassengersIfTime(w, time);
-                }
+                // ★ 設計移行：BlockEntity個別にTickさせるのをやめ、HousingManager から仮想グローバルシミュレーションとして一括処理！
+                HousingManager.tickGlobalSimulation(w, time);
 
-                // 乗客リストは同期化
-                synchronized (PassengerManager.PASSENGER_LIST) {
-                    // 不正プラットフォームをターゲットにしててIDLEの乗客を削除
+                RailwayData railwayData = RailwayData.getInstance(w);
+                if (railwayData == null) continue;
+
+                // 不正プラットフォームターゲットの乗客をクリーンアップ (毎ティックではなく 20ティックごと＝1秒ごとに分散して処理)
+                if (tickCount % 20 == 0) {
                     PassengerManager.PASSENGER_LIST.removeIf(passenger -> {
                         if (passenger.moveState != Passenger.MoveState.IDLE) return false;
                         if (passenger.route == null || passenger.route.isEmpty()) return true;
-
-                        RailwayData railwayData = RailwayData.getInstance(w);
-                        if (railwayData == null) return false;
 
                         Long targetPid = null;
                         if (passenger.routeTargetIndex >= 0 && passenger.routeTargetIndex < passenger.route.size()) {
                             targetPid = passenger.route.get(passenger.routeTargetIndex);
                         } else {
-                            // 範囲外なら削除
                             return true;
                         }
                         return !railwayData.dataCache.platformIdMap.containsKey(targetPid);
                     });
+                }
 
-                    // 追加キュー反映や乗客更新処理（従来通り）
-                    Passenger p;
-                    while ((p = PassengerManager.PENDING_ADD_QUEUE.poll()) != null) {
-                        PassengerManager.PASSENGER_LIST.add(p);
-                    }
+                // 追加待機キューの取り込み
+                Passenger p;
+                while ((p = PassengerManager.PENDING_ADD_QUEUE.poll()) != null) {
+                    PassengerManager.PASSENGER_LIST.add(p);
+                }
 
-                    for (Passenger passenger : PassengerManager.PASSENGER_LIST) {
-                        // 乗客のワールドIDと現在のwのIDを比較
-                        if (passenger.worldId.equals(w.getRegistryKey().getValue().toString())) {
-                            PassengerMovement.updatePassenger(w, passenger);
+                // 一時キャッシュ情報の事前クリア
+                PassengerMovement.prepareTick();
+
+                // このワールド内でデバッグ表示がONになっているプレイヤーのみを抽出
+                List<ServerPlayerEntity> debugViewers = w.getPlayers(player -> debugPathPlayers.contains(player.getUuid()));
+
+                for (Passenger passenger : PassengerManager.PASSENGER_LIST) {
+                    if (passenger.worldId.equals(w.getRegistryKey().getValue().toString())) {
+
+                        boolean shouldUpdate = false;
+                        if (passenger.moveState == Passenger.MoveState.WALKING_TO_PLATFORM ||
+                                passenger.moveState == Passenger.MoveState.WALKING_TO_DESTINATION) {
+                            shouldUpdate = (tickCount % 2 == (passenger.id % 2));
+                        } else {
+                            shouldUpdate = (tickCount % 10 == (passenger.id % 10));
+                        }
+
+                        if (shouldUpdate) {
+                            try {
+                                PassengerMovement.updatePassenger(w, passenger, railwayData);
+                            } catch (Exception e) {
+                                LOGGER.error("[RCAP] 乗客 " + passenger.name + " (" + passenger.id + ") の更新中にエラーが発生しました", e);
+                            }
+                        }
+
+                        // 経路デバッグ用パーティクル表示ロジック
+                        if (!debugViewers.isEmpty()) {
+                            if (tickCount % 20 == 0 && passenger.walkPath != null && !passenger.walkPath.isEmpty()) {
+                                for (Long posLong : passenger.walkPath) {
+                                    BlockPos nodePos = BlockPos.fromLong(posLong);
+                                    double px = nodePos.getX() + 0.5;
+                                    double py = nodePos.getY() + 0.15;
+                                    double pz = nodePos.getZ() + 0.5;
+
+                                    for (ServerPlayerEntity viewer : debugViewers) {
+                                        if (viewer.squaredDistanceTo(px, py, pz) < 32 * 32) {
+                                            w.spawnParticles(viewer, ParticleTypes.HAPPY_VILLAGER, true, px, py, pz, 1, 0, 0, 0, 0);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (tickCount % 10 == 0 && !Double.isNaN(passenger.destinationX) && !Double.isNaN(passenger.destinationY) && !Double.isNaN(passenger.destinationZ)) {
+                                double dx = passenger.destinationX;
+                                double dy = passenger.destinationY + 1.1;
+                                double dz = passenger.destinationZ;
+
+                                for (ServerPlayerEntity viewer : debugViewers) {
+                                    if (viewer.squaredDistanceTo(dx, dy, dz) < 32 * 32) {
+                                        w.spawnParticles(viewer, ParticleTypes.SOUL_FIRE_FLAME, true, dx, dy, dz, 1, 0, 0.05, 0, 0.01);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
         });
 
-        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
-                dispatcher.register(CommandManager.literal("rcap_clear_passengers")
-                        .requires(source -> source.hasPermissionLevel(2))
-                        .executes(context -> {
-                            int removed = PassengerManager.clearAll(context.getSource().getServer());
-                            context.getSource().sendFeedback(Text.literal("Cleared " + removed + " passengers."), true);
-                            return removed;
-                        }))
-        );
+        // コマンド登録処理
+        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+            dispatcher.register(CommandManager.literal("rcap_clear_passengers")
+                    .requires(source -> source.hasPermissionLevel(2))
+                    .executes(context -> {
+                        int removed = PassengerManager.clearAll(context.getSource().getServer());
+                        context.getSource().sendFeedback(Text.literal("§a[RCAP] §f" + removed + "人の乗客を削除しました。"), true);
+                        return removed;
+                    })
+            );
+
+            // 経路デバッグオーバーレイの表示切り替えコマンド
+            dispatcher.register(CommandManager.literal("rcap_debug_paths")
+                    .requires(source -> source.hasPermissionLevel(2))
+                    .executes(context -> {
+                        ServerPlayerEntity player = context.getSource().getPlayer();
+                        if (player != null) {
+                            UUID uuid = player.getUuid();
+                            if (debugPathPlayers.contains(uuid)) {
+                                debugPathPlayers.remove(uuid);
+                                context.getSource().sendFeedback(Text.literal("§a[RCAP] §f乗客の経路デバッグ表示を§c無効§fにしました。"), false);
+                            } else {
+                                debugPathPlayers.add(uuid);
+                                context.getSource().sendFeedback(Text.literal("§a[RCAP] §f乗客の経路デバッグ表示を§a有効§fにしました。"), false);
+                            }
+                        }
+                        return 1;
+                    })
+            );
+
+            // 乗客状態変化ログの表示切り替えコマンド
+            dispatcher.register(CommandManager.literal("rcap_debug_log")
+                    .requires(source -> source.hasPermissionLevel(2))
+                    .executes(context -> {
+                        passengerStateLogEnabled = !passengerStateLogEnabled;
+                        String state = passengerStateLogEnabled ? "§a有効" : "§c無効";
+                        context.getSource().sendFeedback(Text.literal("§a[RCAP] §f乗客の状態変化ログを" + state + "§fにしました。"), false);
+                        return 1;
+                    })
+            );
+        });
     }
 }

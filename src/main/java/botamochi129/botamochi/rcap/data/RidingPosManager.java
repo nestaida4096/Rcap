@@ -3,35 +3,39 @@ package botamochi129.botamochi.rcap.data;
 import botamochi129.botamochi.rcap.block.entity.RidingPosBlockEntity;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArraySet;
 
 public class RidingPosManager {
 
-    // プラットフォームID をキーに対応する乗車位置リストを保持
-    private static final Map<Long, List<RidingPosBlockEntity>> platformIdToRidingPosMap = new HashMap<>();
+    // ★バグ修正：Listの代わりに Set を使用し、毎ティック呼ばれても絶対に重複登録されないようにする
+    private static final Map<Long, Set<RidingPosBlockEntity>> platformIdToRidingPosMap = new ConcurrentHashMap<>();
 
     // RidingPosBlockEntity を登録するメソッド
     public static void registerRidingPos(RidingPosBlockEntity ridingPos) {
         long platformId = ridingPos.getPlatformId();
-        platformIdToRidingPosMap.computeIfAbsent(platformId, k -> new ArrayList<>()).add(ridingPos);
+        // Set.add は既に存在する場合は何もしないので、毎ティック呼ばれても無限増殖しません
+        platformIdToRidingPosMap.computeIfAbsent(platformId, k -> new CopyOnWriteArraySet<>()).add(ridingPos);
     }
 
     // RidingPosBlockEntity を解除するメソッド
     public static void unregisterRidingPos(RidingPosBlockEntity ridingPos) {
         long platformId = ridingPos.getPlatformId();
-        List<RidingPosBlockEntity> list = platformIdToRidingPosMap.get(platformId);
-        if (list != null) {
-            list.remove(ridingPos);
-            if (list.isEmpty()) {
+        Set<RidingPosBlockEntity> set = platformIdToRidingPosMap.get(platformId);
+        if (set != null) {
+            set.remove(ridingPos);
+            if (set.isEmpty()) {
                 platformIdToRidingPosMap.remove(platformId);
             }
         }
     }
 
-    // プラットフォームID から乗車位置リストを取得
+    // プラットフォームID から乗車位置リストを取得（PassengerMovement 互換のために List に変換して返す）
     public static List<RidingPosBlockEntity> getRidingPositions(long platformId) {
-        return platformIdToRidingPosMap.getOrDefault(platformId, Collections.emptyList());
+        Set<RidingPosBlockEntity> set = platformIdToRidingPosMap.get(platformId);
+        if (set == null || set.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return new ArrayList<>(set);
     }
-
-    // ワールドのロード・アンロードやチャンク状態に応じて適宜管理するメソッドなども追加可
-    // 必要に応じて更新処理やキャッシュクリアも
 }

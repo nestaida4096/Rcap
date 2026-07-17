@@ -11,7 +11,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 public class PassengerManager {
-    // スレッドセーフなCopyOnWriteArrayListに変更
+    // スレッドセーフなCopyOnWriteArrayList
     public static List<Passenger> PASSENGER_LIST = new CopyOnWriteArrayList<>();
     private static PassengerState passengerState;
 
@@ -22,7 +22,7 @@ public class PassengerManager {
         passengerState = manager.getOrCreate(
                 PassengerState::createFromNbt, PassengerState::new, PassengerState.KEY
         );
-        // passengerState.passengerListを現在のスレッドセーフなリストに置き換える処理
+
         if (passengerState.passengerList instanceof CopyOnWriteArrayList) {
             PASSENGER_LIST = passengerState.passengerList;
         } else {
@@ -32,7 +32,9 @@ public class PassengerManager {
     }
 
     public static void save() {
-        if (passengerState != null) passengerState.markDirty();
+        if (passengerState != null) {
+            passengerState.markDirty();
+        }
     }
 
     public static void broadcastToAllPlayers(MinecraftServer server) {

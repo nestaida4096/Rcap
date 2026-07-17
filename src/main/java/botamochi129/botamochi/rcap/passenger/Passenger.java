@@ -5,6 +5,7 @@ import net.minecraft.nbt.NbtElement;
 import net.minecraft.nbt.NbtList;
 import net.minecraft.nbt.NbtLong;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,7 +17,7 @@ public class Passenger {
     public int color;
     public int skinIndex;
 
-    // --- 追加部分 ---
+    // --- ルート・目的地関連 ---
     /** 移動ルートとしてのプラットフォームIDリスト */
     public List<Long> route = new ArrayList<>();
     /** 各プラットフォーム step で次に乗るべき routeId。徒歩 step や終点は -1 */
@@ -45,27 +46,22 @@ public class Passenger {
 
     // クライアントが利用するための（オプショナル）列車参照ID（クライアント側で埋める）
     public Long currentTrainId = null;
-    // クライアントで検出した「何号車か」を保持する（サーバ側では基本的に決められないのでクライアントのみで保持）
+    // クライアントで検出した「何号車か」を保持する
     public int currentCarIndex = -1;
 
     // --- 追加フィールド（サーバがスケジュール情報からセットする） ---
-    // 乗車開始推定時刻（millis）。
     public long boardingTimeMillis = -1L;
-    // 降車推定時刻（millis）。
     public long alightTimeMillis = -1L;
-    // 乗車したプラットフォームID
     public long boardingPlatformId = -1L;
-    // 降車予定のプラットフォームID
     public long alightingPlatformId = -1L;
-    // スケジュールから得られた routeId
     public long scheduledRouteId = -1L;
     public int alightRouteIndex = -1;
 
-    // 追加: サーバが計算したプラットフォーム／オフィス座標（クライアントが platformId を持っていない場合のフォールバック）
+    // 座標保存（フォールバック用）
     public double boardingX = Double.NaN, boardingY = Double.NaN, boardingZ = Double.NaN;
     public double alightX = Double.NaN, alightY = Double.NaN, alightZ = Double.NaN;
 
-    // 追加: 最終目的地（オフィス）座標。WALKING_TO_DESTINATION で使用
+    // 最終目的地（オフィス）および帰宅先座標
     public double destinationX = Double.NaN, destinationY = Double.NaN, destinationZ = Double.NaN;
     public double homeX = Double.NaN, homeY = Double.NaN, homeZ = Double.NaN;
     public final List<Long> returnRoute = new ArrayList<>();
@@ -73,11 +69,38 @@ public class Passenger {
     public boolean returningHome = false;
     public long destinationWaitUntilMillis = -1L;
     public boolean commuteTrip = true;
-    public final List<Long> walkPath = new ArrayList<>();
+
+    // パスファインディング経路保持用（スレッドセーフ）
+    public final List<Long> walkPath = new java.util.concurrent.CopyOnWriteArrayList<>();
     public int walkPathIndex = 0;
     public long walkTargetKey = Long.MIN_VALUE;
+
     public long lastAlightedRouteId = -1L;
     public long lastAlightedAtMillis = -1L;
+
+    // --- スタック防止・放置救済用の追加フィールド (シリアライズ不要な動的状態) ---
+    /** 前回の更新時のX座標 */
+    public double lastTickX = Double.NaN;
+    /** 前回の更新時のZ座標 */
+    public double lastTickZ = Double.NaN;
+    /** 同じ場所に留まり続けている（動けていない）Tick数 */
+    public int stuckTicks = 0;
+    /** IDLE状態になってからのシステム時刻（ミリ秒）*/
+    public long idleStartTimeMillis = -1L;
+
+    // Watchdogフリーズ防止用の最終経路探索実行時刻（Tick数）
+    public transient long lastPathfindTick = -1L;
+
+    // 非同期で経路探索が実行中かどうかを管理するスレッドセーフなフラグ
+    public transient volatile boolean isPathfinding = false;
+
+    // ★改善：リーダー追従（群衆トレイル）用の動的メモリ領域（シリアライズ不要なため transient）
+    /** 自身がリーダーである場合、フォロワーに分け与えるために記録し続ける実座標の軌跡 */
+    public transient final List<Vec3d> positionTrail = new java.util.concurrent.CopyOnWriteArrayList<>();
+    /** 自身がフォロワーである場合、追従対象としているリーダー乗客のID */
+    public transient long leaderPassengerId = -1L;
+    /** グループ内における自分のフォロワー順位（デシインデックス） */
+    public transient int followerRank = 0;
 
     public Passenger(long id, String name, double x, double y, double z, int color, String worldId) {
         this.id = id;
@@ -101,7 +124,6 @@ public class Passenger {
         tag.putInt("color", color);
         tag.putString("worldId", worldId);
 
-        // ルート保存
         NbtList listTag = new NbtList();
         for (Long platformId : route) {
             listTag.add(NbtLong.of(platformId));
@@ -118,7 +140,6 @@ public class Passenger {
         tag.putInt("moveState", moveState.ordinal());
         tag.putInt("skinIndex", skinIndex);
 
-        // 追加フィールド
         tag.putLong("boardingTimeMillis", boardingTimeMillis);
         tag.putLong("alightTimeMillis", alightTimeMillis);
         tag.putLong("boardingPlatformId", boardingPlatformId);
@@ -126,7 +147,6 @@ public class Passenger {
         tag.putLong("scheduledRouteId", scheduledRouteId);
         tag.putInt("alightRouteIndex", alightRouteIndex);
 
-        // 座標保存（DoubleをNBTに）
         tag.putDouble("boardingX", boardingX);
         tag.putDouble("boardingY", boardingY);
         tag.putDouble("boardingZ", boardingZ);
@@ -134,7 +154,6 @@ public class Passenger {
         tag.putDouble("alightY", alightY);
         tag.putDouble("alightZ", alightZ);
 
-        // 目的地（オフィス）座標保存
         tag.putDouble("destinationX", destinationX);
         tag.putDouble("destinationY", destinationY);
         tag.putDouble("destinationZ", destinationZ);
@@ -157,8 +176,6 @@ public class Passenger {
         tag.putBoolean("commuteTrip", commuteTrip);
         tag.putLong("lastAlightedRouteId", lastAlightedRouteId);
         tag.putLong("lastAlightedAtMillis", lastAlightedAtMillis);
-
-        // currentCarIndex はクライアントのみで検出・使用する想定のため NBT に含めない（必要なら追加可能）
 
         return tag;
     }
@@ -258,7 +275,6 @@ public class Passenger {
         p.lastAlightedRouteId = tag.contains("lastAlightedRouteId") ? tag.getLong("lastAlightedRouteId") : -1L;
         p.lastAlightedAtMillis = tag.contains("lastAlightedAtMillis") ? tag.getLong("lastAlightedAtMillis") : -1L;
 
-        // currentTrainId / currentCarIndex はクライアント側で検出・埋めるため NBT では保持しない
         p.currentTrainId = null;
         p.currentCarIndex = -1;
 

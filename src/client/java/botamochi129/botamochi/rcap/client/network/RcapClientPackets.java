@@ -12,7 +12,9 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.util.math.BlockPos;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class RcapClientPackets {
 
@@ -21,7 +23,7 @@ public class RcapClientPackets {
             int size = buf.readInt();
             List<Company> companies = new ArrayList<>();
             for (int i = 0; i < size; i++) {
-                companies.add(Company.fromNBT(buf.readNbt())); // ← Company.fromNBT は既にあり ✅
+                companies.add(Company.fromNBT(buf.readNbt()));
             }
 
             client.execute(() -> {
@@ -41,8 +43,6 @@ public class RcapClientPackets {
                 var be = world.getBlockEntity(pos);
                 if (be instanceof RidingPosBlockEntity ridingPos) {
                     ridingPos.setPlatformId(platformId);
-
-                    // ✅ GUIを開く
                     client.setScreen(new RidingPosScreen(ridingPos));
                 }
             });
@@ -50,11 +50,47 @@ public class RcapClientPackets {
 
         ClientPlayNetworking.registerGlobalReceiver(RcapServerPackets.SYNC_PASSENGER_LIST, (client, handler, buf, sender) -> {
             int size = buf.readInt();
-            ArrayList<Passenger> list = new ArrayList<>();
-            for (int i = 0; i < size; i++) list.add(Passenger.fromNbt(buf.readNbt()));
+            ArrayList<Passenger> incomingList = new ArrayList<>();
+            for (int i = 0; i < size; i++) {
+                incomingList.add(Passenger.fromNbt(buf.readNbt()));
+            }
+
             client.execute(() -> {
+                Map<Long, Passenger> existingMap = new HashMap<>();
+                for (Passenger p : PassengerManager.PASSENGER_LIST) {
+                    if (p != null) {
+                        existingMap.put(p.id, p);
+                    }
+                }
+
+                ArrayList<Passenger> mergedList = new ArrayList<>();
+                for (Passenger incoming : incomingList) {
+                    Passenger existing = existingMap.get(incoming.id);
+                    if (existing != null) {
+                        incoming.lastTickX = existing.lastTickX;
+                        incoming.lastTickZ = existing.lastTickZ;
+                        incoming.stuckTicks = existing.stuckTicks;
+
+                        // 乗車中の列車の ID・号車番号のみを引き継ぐ（号車ワープ防止）
+                        if (incoming.moveState == Passenger.MoveState.ON_TRAIN) {
+                            incoming.currentTrainId = existing.currentTrainId;
+                            incoming.currentCarIndex = existing.currentCarIndex;
+                        }
+
+                        // ★改善:
+                        // 前回はここで `incoming.x = existing.x;` のように座標を上書きしていたため、
+                        // サーバーの進行座標が無視されて動かなくなっていました。
+                        // 今回はサーバーからの最新座標（x, y, z）をそのまま正とし、描画側で補間をさせます。
+
+                    } else {
+                        incoming.lastTickX = incoming.x;
+                        incoming.lastTickZ = incoming.z;
+                    }
+                    mergedList.add(incoming);
+                }
+
                 PassengerManager.PASSENGER_LIST.clear();
-                PassengerManager.PASSENGER_LIST.addAll(list);
+                PassengerManager.PASSENGER_LIST.addAll(mergedList);
             });
         });
     }
