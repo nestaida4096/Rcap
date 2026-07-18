@@ -3,7 +3,7 @@ package botamochi129.botamochi.rcap.client.render;
 import botamochi129.botamochi.rcap.mixin.TrainAccessor;
 import botamochi129.botamochi.rcap.passenger.Passenger;
 import botamochi129.botamochi.rcap.passenger.PassengerManager;
-import botamochi129.botamochi.rcap.passenger.TrainPassengerCountManager; // 新しい管理クラスのインポート
+import botamochi129.botamochi.rcap.passenger.TrainPassengerCountManager;
 import mtr.client.ClientData;
 import mtr.data.Platform;
 import mtr.data.TrainClient;
@@ -30,16 +30,27 @@ public class PassengerRenderer {
 
     private static final Map<Long, VisualState> visualStates = new HashMap<>();
 
-    // 列車・車両ごとのグリッド割り当て状態を管理するインナークラス
-    private static class TrainGridState {
-        // 乗客ID -> 割り当てられた一意の gridIndex
-        final Map<Long, Integer> passengerGridMap = new HashMap<>();
-        // 割り当て済みのインデックス一覧
-        final Set<Integer> allocatedIndices = new HashSet<>();
+    // ★修正2: 座席位置の一意な固定・ワープ防止用の堅牢なキャッシュ構造
+    private static class AssignedSeat {
+        final long trainId;
+        final int carIndex;
+        final int gridIndex;
+
+        AssignedSeat(long trainId, int carIndex, int gridIndex) {
+            this.trainId = trainId;
+            this.carIndex = carIndex;
+            this.gridIndex = gridIndex;
+        }
     }
 
-    // 列車・車両のユニークキー (trainId_carIndex) -> グリッド割り当て状態
-    private static final Map<String, TrainGridState> trainGridStates = new HashMap<>();
+    // 乗客ID -> 割り当てられた固定座席のキャッシュ
+    private static final Map<Long, AssignedSeat> passengerSeats = new HashMap<>();
+
+    // 列車・車両のユニークキー (trainId_carIndex) -> 割り当て済み gridIndex のセット
+    private static final Map<String, Set<Integer>> carAllocatedGrids = new HashMap<>();
+
+    // ★修正3: 車端部に固まる現象を防ぐため、中央の席から優先的に並べた座席オーダーのキャッシュ
+    private static final Map<Integer, int[]> seatOrderCache = new HashMap<>();
 
     private static class PositionSample {
         final double x, y, z;
@@ -81,7 +92,7 @@ public class PassengerRenderer {
 
             long now = System.currentTimeMillis();
 
-            // === 2. 列車ごとに乗車している乗客人数を集計し、新しい管理クラスに保存 ===
+            // 列車ごとに乗車している乗客人数を集計し、管理クラスに保存
             Map<Long, Integer> countsThisFrame = new HashMap<>();
             for (Passenger passenger : passengers) {
                 if (passenger.moveState == Passenger.MoveState.ON_TRAIN && passenger.currentTrainId != null) {
@@ -90,7 +101,6 @@ public class PassengerRenderer {
             }
             TrainPassengerCountManager.clear();
             countsThisFrame.forEach(TrainPassengerCountManager::setCount);
-            // ==========================================================
 
             final double LONG_CELL = 0.65;
             final double LAT_CELL = 0.35;
@@ -142,6 +152,12 @@ public class PassengerRenderer {
                     if (matchedTrain != null) {
                         try {
                             int carCount = getTrainCarCount(matchedTrain);
+
+                            // ★修正2: すでに座席が固定されている場合、強制的にキャッシュから号車を復元する（号車間ワープ防止）
+                            AssignedSeat cachedSeat = passengerSeats.get(passenger.id);
+                            if (cachedSeat != null && cachedSeat.trainId == matchedTrain.id) {
+                                passenger.currentCarIndex = cachedSeat.carIndex;
+                            }
 
                             if (passenger.currentCarIndex < 0) {
                                 int bestIndex = -1;
@@ -236,34 +252,45 @@ public class PassengerRenderer {
                                 double usableWidth = Math.max(LAT_CELL, width - LATERAL_MARGIN * 2.0);
                                 int intWidth = Math.max(1, (int)Math.floor(usableWidth / LAT_CELL));
 
-                                // === 1. 一意なグリッド割り当て処理による団子化の防止 ===
-                                String carKey = matchedTrain.id + "_" + carIdx;
-                                TrainGridState gridState = trainGridStates.computeIfAbsent(carKey, k -> new TrainGridState());
+                                // ★修正2: 新たな座席の一意割り当て。一度決まればキャッシュにより絶対に動かない。
+                                if (cachedSeat == null || cachedSeat.trainId != matchedTrain.id || cachedSeat.carIndex != carIdx) {
+                                    String carKey = matchedTrain.id + "_" + carIdx;
+                                    Set<Integer> allocated = carAllocatedGrids.computeIfAbsent(carKey, k -> new HashSet<>());
 
-                                int gridIndex;
-                                if (gridState.passengerGridMap.containsKey(passenger.id)) {
-                                    gridIndex = gridState.passengerGridMap.get(passenger.id);
-                                } else {
-                                    // 空いている最小のグリッドインデックス（シート・立ち位置番号）を取得
-                                    gridIndex = 0;
-                                    while (gridState.allocatedIndices.contains(gridIndex)) {
-                                        gridIndex++;
+                                    int newGridIndex = 0;
+                                    while (allocated.contains(newGridIndex)) {
+                                        newGridIndex++;
                                     }
-                                    gridState.passengerGridMap.put(passenger.id, gridIndex);
-                                    gridState.allocatedIndices.add(gridIndex);
+                                    allocated.add(newGridIndex);
+                                    cachedSeat = new AssignedSeat(matchedTrain.id, carIdx, newGridIndex);
+                                    passengerSeats.put(passenger.id, cachedSeat);
                                 }
 
-                                // 1対1変換の決定論的ロジック: 配列[0]（gridIndex = 0）を「車両の最も後方かつ最も左側」と明示
-                                // idxLong: longitudinal方向（後方 0 -> 前方 (intSpacing-1)）
-                                // idxLat: lateral方向（左側 0 -> 右側 (intWidth-1)）
-                                int idxLong = gridIndex % intSpacing;
-                                int idxLat = gridIndex / intSpacing;
+                                int gridIndex = cachedSeat.gridIndex;
 
-                                // もしグリッドの容量（シート数）を超過した乗客がいた場合の安全用クランプ
+                                // ★修正3: 車両の端から埋まる現象を防ぐため、中央から順に座席を割り当てる
+                                int capacity = intSpacing * intWidth;
+                                int assignedGridIndex = gridIndex;
+                                if (capacity > 0) {
+                                    int[] order = getSeatOrder(intSpacing, intWidth);
+                                    if (gridIndex < capacity) {
+                                        assignedGridIndex = order[gridIndex];
+                                    } else {
+                                        // 定員超過時は、適度に散らばるようにモジュロで折り返す
+                                        assignedGridIndex = order[gridIndex % capacity];
+                                    }
+                                }
+
+                                int idxLong = assignedGridIndex % intSpacing;
+                                int idxLat = assignedGridIndex / intSpacing;
+
+                                // 万が一の安全用クランプ
                                 if (idxLat >= intWidth) {
                                     idxLat = intWidth - 1;
                                 }
-                                // ===================================================
+                                if (idxLong >= intSpacing) {
+                                    idxLong = intSpacing - 1;
+                                }
 
                                 double startLong = -((intSpacing - 1) / 2.0) * LONG_CELL;
                                 double startLat = -((intWidth - 1) / 2.0) * LAT_CELL;
@@ -276,9 +303,10 @@ public class PassengerRenderer {
 
                                 Vec3d offset = frameForward.multiply(longitudinal).add(frameRight.multiply(lateralInt));
 
-                                double targetX = center.x + offset.x + frameUp.x * FLOOR_OFFSET;
-                                double targetY = center.y + offset.y + frameUp.y * FLOOR_OFFSET - 1.0;
-                                double targetZ = center.z + offset.z + frameUp.z * FLOOR_OFFSET;
+                                double floorOffset = getTrainRiderOffset(matchedTrain, FLOOR_OFFSET);
+                                double targetX = center.x + offset.x + frameUp.x * floorOffset;
+                                double targetY = center.y + offset.y + frameUp.y * floorOffset - 1.0;
+                                double targetZ = center.z + offset.z + frameUp.z * floorOffset;
 
                                 vs.x = targetX;
                                 vs.y = targetY;
@@ -499,34 +527,59 @@ public class PassengerRenderer {
 
             visualStates.keySet().retainAll(activePassengerIds);
 
-            // === 1-2. 電車内グリッド割り当てキャッシュのクリーンアップ ===
-            // 現在のフレームにおける「車両キー -> 乗客IDのセット」を構築
-            Map<String, Set<Long>> activeCarPassengers = new HashMap<>();
+            // ★修正2: 電車内グリッド割り当てキャッシュのクリーンアップ（ON_TRAIN 状態でのみ座席を半永久保持する）
+            Set<Long> onTrainPassengerIds = new HashSet<>();
             for (Passenger p : passengers) {
-                if (p.moveState == Passenger.MoveState.ON_TRAIN && p.currentTrainId != null && p.currentCarIndex >= 0) {
-                    String carKey = p.currentTrainId + "_" + p.currentCarIndex;
-                    activeCarPassengers.computeIfAbsent(carKey, k -> new HashSet<>()).add(p.id);
+                if (p.moveState == Passenger.MoveState.ON_TRAIN) {
+                    onTrainPassengerIds.add(p.id);
                 }
             }
 
-            // キャッシュデータから、降車した乗客のインデックスを開放
-            Iterator<Map.Entry<String, TrainGridState>> it = trainGridStates.entrySet().iterator();
-            while (it.hasNext()) {
-                Map.Entry<String, TrainGridState> entry = it.next();
-                String key = entry.getKey();
-                TrainGridState state = entry.getValue();
+            // 降車した乗客の座席割り当て情報を破棄
+            passengerSeats.keySet().retainAll(onTrainPassengerIds);
 
-                Set<Long> activeIds = activeCarPassengers.get(key);
-                if (activeIds == null || activeIds.isEmpty()) {
-                    it.remove(); // 誰も乗っていない車両の状態はマップから削除
-                } else {
-                    // 車両から降車・移動した乗客のグリッドインデックス割り当てを解除
-                    state.passengerGridMap.keySet().retainAll(activeIds);
-                    state.allocatedIndices.clear();
-                    state.allocatedIndices.addAll(state.passengerGridMap.values());
-                }
+            // 車両ごとの割り当て済みインデックス一覧を再構築
+            carAllocatedGrids.clear();
+            for (AssignedSeat seat : passengerSeats.values()) {
+                String carKey = seat.trainId + "_" + seat.carIndex;
+                carAllocatedGrids.computeIfAbsent(carKey, k -> new HashSet<>()).add(seat.gridIndex);
             }
             // ========================================================
+        });
+    }
+
+    // ★修正3: 座席の中央からの優先順位を計算してキャッシュするメソッド
+    private static int[] getSeatOrder(int intSpacing, int intWidth) {
+        int capacity = intSpacing * intWidth;
+        if (capacity <= 0) return new int[0];
+
+        return seatOrderCache.computeIfAbsent(capacity, c -> {
+            Integer[] order = new Integer[c];
+            for (int i = 0; i < c; i++) order[i] = i;
+
+            // 車両の中心座標
+            double midLong = (intSpacing - 1) / 2.0;
+            double midLat = (intWidth - 1) / 2.0;
+
+            // 中央に近い順にソートする
+            Arrays.sort(order, (a, b) -> {
+                int aLong = a % intSpacing;
+                int aLat = a / intSpacing;
+                int bLong = b % intSpacing;
+                int bLat = b / intSpacing;
+
+                double distA = Math.pow(aLong - midLong, 2) + Math.pow(aLat - midLat, 2);
+                double distB = Math.pow(bLong - midLong, 2) + Math.pow(bLat - midLat, 2);
+
+                if (distA == distB) {
+                    return Integer.compare(a, b);
+                }
+                return Double.compare(distA, distB);
+            });
+
+            int[] result = new int[c];
+            for(int i = 0; i < c; i++) result[i] = order[i];
+            return result;
         });
     }
 
@@ -883,6 +936,17 @@ public class PassengerRenderer {
             } catch (Throwable ignored) {}
         }
 
+        return fallback;
+    }
+
+    private static double getTrainRiderOffset(TrainClient trainClient, double fallback) {
+        Object properties = tryReadObject(trainClient, "trainProperties", "getTrainProperties");
+        if (properties != null) {
+            Object offsetObj = tryReadObject(properties, "riderOffset", "getRiderOffset");
+            if (offsetObj instanceof Number number) {
+                return number.doubleValue();
+            }
+        }
         return fallback;
     }
 
